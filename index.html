@@ -432,7 +432,31 @@ function setLedgerField(charId,date,field,raw){
   logH('edit','ledger '+date+' '+field+'='+(val==null?'—':val));
   save();render();
 }
-function deleteLedgerEntry(id){var idx=S.dailyLedger.findIndex(function(e){return e.id===id;});if(idx<0)return;var snap=S.dailyLedger[idx];S.dailyLedger.splice(idx,1);pushUndo(function(){S.dailyLedger.push(snap);},function(){S.dailyLedger=S.dailyLedger.filter(function(e){return e.id!==id;});},'deleted ledger '+snap.date);logH('delete','deleted ledger entry '+snap.date+' for '+snap.character);save();render();showToast('ledger entry deleted','muted');}
+function deleteLedgerEntry(id){
+  var idx=S.dailyLedger.findIndex(function(e){return e.id===id;});if(idx<0)return;
+  var snap=S.dailyLedger[idx];
+  var c=gc(snap.character);var charName=c?c.name:snap.character;
+  var isRange=!!snap.rangeStart;
+  var dateLabel=isRange?(snap.rangeStart+' → '+(snap.rangeEnd||snap.date)):snap.date;
+  var typeLabel=isRange?(Math.round((new Date(snap.rangeEnd||snap.date)-new Date(snap.rangeStart))/86400000)+1)+'-day range entry':'daily entry';
+  var bits=[];
+  if(snap.gmv!=null)bits.push('GMV '+fmtUSD(snap.gmv));
+  if(snap.itemsSold!=null)bits.push(snap.itemsSold+' items');
+  if(snap.commission!=null)bits.push('commission '+fmtUSD(snap.commission));
+  var detail=bits.length?'<div class="muted" style="font-size:12px;margin-top:6px">'+bits.join(' · ')+'</div>':'';
+  showConf(
+    'delete '+typeLabel+'?',
+    '<strong>'+charName+'</strong> · '+dateLabel+detail+'<br><br><span style="font-size:12px;color:var(--text2)">cmd+z undoes this if you change your mind.</span>',
+    function(){
+      S.dailyLedger.splice(idx,1);
+      pushUndo(function(){S.dailyLedger.splice(idx,0,snap);},function(){S.dailyLedger=S.dailyLedger.filter(function(e){return e.id!==id;});},'deleted ledger '+dateLabel);
+      logH('delete','deleted ledger '+dateLabel+' for '+snap.character);
+      save();render();showToast('ledger entry deleted','muted');
+    },
+    'delete',
+    '#e24b4a'
+  );
+}
 function setLedgerEntryField(id,field,raw){
   var val=raw==null||raw===''?null:Number(raw);if(isNaN(val))val=null;
   var e=S.dailyLedger.find(function(x){return x.id===id;});if(!e)return;
