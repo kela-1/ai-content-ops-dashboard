@@ -583,55 +583,55 @@ function detectScreenshotType(text){
 }
 
 // Parse a TTS Shop daily-aggregate screenshot.
-// TikTok renders 2x2 grids of (label, value) pairs. Tesseract often serializes them row-major,
-// which interleaves columns: [labelA labelB valueA valueB %A %B labelC labelD valueC valueD ...]
-// The parser has to handle both that and the column-major layout.
+// Three layouts to handle:
+//   1. Shop Home: 3-column row-major. "Attr. GMV / Attr. items sold / Est. commission" then "$X / N / $Y"
+//   2. Data Overview: 2x2 grid, no commission visible
+//   3. Data Commissions: 2x2 grid, "Commission base" + "Est. commissions" pair, want only the latter
+// Tesseract typically serializes row-major (labels-row then values-row), which interleaves columns.
 function parseDailyScreenshot(text){
   var t=text.replace(/[\r\n]+/g,' ').replace(/\s+/g,' ');
 
   // GMV — first $ amount after the GMV label.
-  var gmvMatch=t.match(/(?:attr\.?|commission)?\s*gmv[^$]{0,60}\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM])?/i);
+  var gmvMatch=t.match(/(?:attr\.?|commission)?\s*gmv[^$]{0,80}\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM])?/i);
   var gmv=gmvMatch?parseAmount(gmvMatch[1],gmvMatch[2]):null;
 
-  // Items sold — bare integer with no $ prefix. Strip $X amounts before searching so the regex
-  // doesn't grab digits from an interleaved $ value (e.g. "$2.8K" giving us "2").
+  // Items sold — bare integer with no $ prefix. Strip away both $X amounts AND "N days" phrases
+  // (from "Last 7 days" toggle and "...past 7 days" banner text) so we don't grab "7" by mistake.
   var itemsSold=null;
   var itemsPos=t.search(/items?\s+sold/i);
   if(itemsPos>-1){
     var afterItems=t.substring(itemsPos);
-    var stripped=afterItems.replace(/\$\s*[\d,]+(?:\.\d+)?\s*[kKmM]?/g,' ');
-    var im=stripped.match(/items?\s+sold[\s\S]{0,80}?(?:^|[^\d.])([\d,]+)(?!\.\d)/i);
+    var stripped=afterItems
+      .replace(/\$\s*[\d,]+(?:\.\d+)?\s*[kKmM]?/g,' ')
+      .replace(/\b(?:last|past|next|in)\s+\d+\s+(?:days?|weeks?|months?|hours?)\b/gi,' ')
+      .replace(/\b\d+\s*(?:days?|weeks?|months?|hours?|min|minutes?|sec|seconds?|am|pm)\b/gi,' ');
+    var im=stripped.match(/items?\s+sold[\s\S]{0,120}?(?:^|[^\d.])([\d,]+)(?!\.\d)/i);
     if(im){var v=parseInt(im[1].replace(/,/g,''));if(!isNaN(v))itemsSold=v;}
   }
 
-  // Commission — handle row-major (label-row then value-row) AND column-major layouts.
-  // Also skip the disclaimer banner ("Estimated commissions data by products...") at the top:
-  // require a $ sign within 100 chars of any candidate label match.
+  // Commission — find "Est. commission(s)" with a $ within 100 chars (skips the banner mention),
+  // then take the LAST $ amount in the value cluster after the label. The value cluster ends at
+  // the next 5+ letter word (= a label like "Commission" or banner text).
   var commission=null;
-  var estPos=-1;
+  var estPos=-1,estLen=0;
   var estRe=/est(?:\.|imated)?\s+commissions?\b/gi;
   var em;
   while((em=estRe.exec(t))!==null){
-    if(/\$/.test(t.substring(em.index,em.index+100))){estPos=em.index;break;}
+    if(/\$/.test(t.substring(em.index,em.index+100))){estPos=em.index;estLen=em[0].length;break;}
   }
-  var basePos=t.search(/commission\s+base/i);
-  if(basePos>-1&&estPos>-1&&estPos>basePos){
-    var between=t.substring(basePos,estPos);
-    if(!/\$/.test(between)){
-      // Row-major: labels grouped first, then values. First $ after Est. is "Commission base"
-      // value; SECOND $ is the actual Est. commissions value.
-      var afterEst=t.substring(estPos);
-      var dollarRe=/\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM])?/g;
-      var dollars=[];var dm;
-      while((dm=dollarRe.exec(afterEst))!==null)dollars.push(dm);
-      if(dollars.length>=2)commission=parseAmount(dollars[1][1],dollars[1][2]);
+  if(estPos>-1){
+    var afterEst=t.substring(estPos+estLen);
+    // Cluster: everything up to the next 5+ letter word (excluding numbers / $ / %)
+    var cluster=afterEst;
+    var stopMatch=afterEst.match(/\b[A-Za-z]{5,}\b/);
+    if(stopMatch)cluster=afterEst.substring(0,stopMatch.index);
+    var dollarRe=/\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM])?/g;
+    var dollars=[];var dm;
+    while((dm=dollarRe.exec(cluster))!==null)dollars.push(dm);
+    if(dollars.length>0){
+      var last=dollars[dollars.length-1];
+      commission=parseAmount(last[1],last[2]);
     }
-  }
-  if(commission==null&&estPos>-1){
-    // Column-major (or no Commission base nearby) — first $ after Est. commissions is correct.
-    var tail=t.substring(estPos);
-    var cm=tail.match(/^[^$]{0,80}\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM])?/);
-    if(cm)commission=parseAmount(cm[1],cm[2]);
   }
 
   // Date detection
@@ -644,6 +644,16 @@ function parseDailyScreenshot(text){
   if(!dateInfo.mode){
     var singleMatch=t.match(/([a-z]+\s+\d+,?\s+\d{4})\s*(?:\(GMT|$|\s)/i);
     if(singleMatch){var d=new Date(singleMatch[1]);if(!isNaN(d.getTime())){dateInfo.mode='single';dateInfo.date=d.toISOString().slice(0,10);}}
+  }
+  // Fallback: no specific date in OCR (e.g. Shop Home view) — default to "last 7 days" range
+  // ending yesterday. User can switch to single in the confirm step.
+  if(!dateInfo.mode){
+    var yest=new Date();yest.setDate(yest.getDate()-1);
+    var weekAgo=new Date(yest);weekAgo.setDate(yest.getDate()-6);
+    dateInfo.mode='range';
+    dateInfo.startDate=weekAgo.toISOString().slice(0,10);
+    dateInfo.endDate=yest.toISOString().slice(0,10);
+    dateInfo.defaulted=true;
   }
   return {gmv:gmv,itemsSold:itemsSold,commission:commission,dateInfo:dateInfo,rawText:text};
 }
@@ -750,7 +760,7 @@ function processTtsImage(){
     renderTtsModal();
   });
 }
-function saveTtsToLedger(){
+function saveTtsToLedger(force){
   if(!S.ttsModal||!S.ttsModal.extracted)return;
   var charId=S.ttsModal.charId;
   function rdNum(id,asInt){var el=document.getElementById(id);if(!el||el.value===''||el.value==null)return null;var n=asInt?parseInt(el.value):Number(el.value);return isNaN(n)?null:n;}
@@ -799,9 +809,21 @@ function saveTtsToLedger(){
     save();closeTtsModal();render();return;
   }
 
-  // DAILY save path (existing logic)
+  // DAILY save path
   var gmv=rdNum('tts-gmv',false),items=rdNum('tts-items',true),commission=rdNum('tts-comm',false);
   if(gmv==null&&items==null&&commission==null){showToast('nothing to save — fill at least one field','red');return;}
+  // Warn if any field is blank — most common cause is uploading the wrong tab (e.g. Overview without commission).
+  if(!force){
+    var missing=[];
+    if(gmv==null)missing.push('GMV');
+    if(items==null)missing.push('items sold');
+    if(commission==null)missing.push('commission');
+    if(missing.length>0){
+      var hint=missing.indexOf('commission')>-1?'<br><br>You may have uploaded an <strong>Overview</strong> dashboard screenshot — that tab doesn\'t show commission. The <strong>Commissions</strong> tab has the Est. commission field. Upload that one, or type the missing value(s) manually.':'<br><br>Type the missing value(s) manually if you have them.';
+      showConf(missing.length+' empty field'+(missing.length>1?'s':''),'These are blank: <strong>'+missing.join(', ')+'</strong>.'+hint+'<br><br>Save anyway with what we have?',function(){saveTtsToLedger(true);},'save anyway','#BA7517');
+      return;
+    }
+  }
   if(S.ttsModal.mode==='single'){
     var date=S.ttsModal.date;
     var existing=getDailyEntry(charId,date);var hadBefore=!!existing;
