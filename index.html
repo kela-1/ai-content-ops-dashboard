@@ -94,6 +94,13 @@ body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:v
 #modal-wrap{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9997;align-items:flex-start;justify-content:center;padding:24px 16px;overflow-y:auto}
 button{font-family:inherit}
 input,select,textarea{font-family:inherit}
+/* Hide native number input spinners — looked dated */
+input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+input[type=number]{-moz-appearance:textfield;appearance:textfield}
+/* Calendar / picker chevron — modernize for date inputs */
+input[type=date]::-webkit-calendar-picker-indicator{filter:invert(0.55);cursor:pointer;opacity:0.6;transition:opacity 0.15s}
+input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1}
+.light-mode input[type=date]::-webkit-calendar-picker-indicator{filter:invert(0.4)}
 </style>
 </head>
 <body>
@@ -613,15 +620,24 @@ function parseVideoScreenshot(text){
   var postedMatch=t.match(/posted\s+on\s+([a-z]+\s+\d+,?\s+\d{4})/i);
   var postedDate=null;
   if(postedMatch){var pd=new Date(postedMatch[1]);if(!isNaN(pd.getTime()))postedDate=pd.toISOString().slice(0,10);}
-  // Engagement row: 5 numbers between the post-time and the tab labels (Inspiration|Overview|Viewers|Engagement)
+  // Engagement row: TikTok Studio shows views/likes/comments/shares/saves as 5 numbers
+  // right before the tab labels (Inspiration|Overview|Viewers|Engagement).
+  // Tolerant approach: gather every number-token BEFORE that anchor, take the last 5.
+  // [0] is the top-row views (often "88K") — we override with the labeled "Video views" value.
+  // [1..4] are likes, comments, shares, saves.
   var likes=null,comments=null,shares=null,saves=null;
-  var engM=t.match(/(?:AM|PM)\s+([\d.,]+\s*[KkMm]?)\s+([\d.,]+\s*[KkMm]?)\s+([\d.,]+\s*[KkMm]?)\s+([\d.,]+\s*[KkMm]?)\s+([\d.,]+\s*[KkMm]?)\s+(?:Inspiration|Overview|Viewers|Engagement)/i);
-  if(engM){
-    // engM[1] = top-row views (often "88K"), then likes/comments/shares/saves
-    likes=parseNumWithSuffix(engM[2]);
-    comments=parseNumWithSuffix(engM[3]);
-    shares=parseNumWithSuffix(engM[4]);
-    saves=parseNumWithSuffix(engM[5]);
+  var anchor=/(?:Inspiration|Overview|Viewers|Engagement)\b/i.exec(t);
+  if(anchor){
+    var beforeAnchor=t.substring(0,anchor.index);
+    var tokens=beforeAnchor.match(/\d[\d,.]*\s*[KkMm]?/g)||[];
+    // Drop tokens that are clearly part of the date ("2026", "26,", "16" from "8:16")
+    // by filtering: a date year is 4 consecutive digits, day is 1-2 digits + comma. The
+    // engagement-row tokens are usually trailing numbers after the date, so taking the
+    // last 5 in OCR reading order is safe in practice.
+    if(tokens.length>=5){
+      var last5=tokens.slice(-5).map(function(s){return parseNumWithSuffix(s.trim());});
+      likes=last5[1];comments=last5[2];shares=last5[3];saves=last5[4];
+    }
   }
   return {views:views,likes:likes,comments:comments,shares:shares,saves:saves,totalPlayTime:totalPlayTime,avgWatchTime:avgWatchTime,watchFullPct:watchFullPct,newFollowers:newFollowers,commission:commission,postedDate:postedDate,rawText:text};
 }
