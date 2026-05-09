@@ -190,7 +190,7 @@ function load(){
       if(!Array.isArray(S.blueprints))S.blueprints=[];
       if(!Array.isArray(S.dailyLedger))S.dailyLedger=[];
       // Revenue migration on ledger
-      S.dailyLedger.forEach(function(e){if(!('gmv' in e))e.gmv=null;if(!('itemsSold' in e))e.itemsSold=null;if(!('commission' in e))e.commission=null;});
+      S.dailyLedger.forEach(function(e){if(!('gmv' in e))e.gmv=null;if(!('itemsSold' in e))e.itemsSold=null;if(!('commission' in e))e.commission=null;if(!('rangeStart' in e))e.rangeStart=null;if(!('rangeEnd' in e))e.rangeEnd=null;});
       if(!Array.isArray(S.motions))S.motions=[];
       if(!Array.isArray(S.angles))S.angles=[];
       if(!Array.isArray(S.motionTags))S.motionTags=['walking','standing','sitting','turning','gesture','intro','closeup'];
@@ -399,9 +399,28 @@ function restoreFavRefs(kind,itemId,charIds){charIds.forEach(function(cid){var c
 
 // === Daily credit ledger ===
 function todayStr(){return new Date().toISOString().slice(0,10);}
-function getDailyEntry(charId,date){return S.dailyLedger.find(function(e){return e.character===charId&&e.date===date;});}
-function upsertDailyEntry(charId,date,patch){var e=getDailyEntry(charId,date);if(!e){e={id:Date.now()+Math.floor(Math.random()*9999),character:charId,date:date,startBalance:null,endBalance:null,gmv:null,itemsSold:null,commission:null,note:''};S.dailyLedger.push(e);}Object.assign(e,patch);return e;}
-function dailyEntriesForChar(charId){return S.dailyLedger.filter(function(e){return e.character===charId;}).sort(function(a,b){return a.date<b.date?1:-1;});}
+// getDailyEntry returns ONLY single-day entries (no rangeStart). Range entries are handled separately.
+function getDailyEntry(charId,date){return S.dailyLedger.find(function(e){return e.character===charId&&e.date===date&&!e.rangeStart;});}
+function upsertDailyEntry(charId,date,patch){var e=getDailyEntry(charId,date);if(!e){e={id:Date.now()+Math.floor(Math.random()*9999),character:charId,date:date,startBalance:null,endBalance:null,gmv:null,itemsSold:null,commission:null,rangeStart:null,rangeEnd:null,note:''};S.dailyLedger.push(e);}Object.assign(e,patch);return e;}
+function dailyEntriesForChar(charId){return S.dailyLedger.filter(function(e){return e.character===charId;}).sort(function(a,b){var ad=(a.rangeEnd||a.date),bd=(b.rangeEnd||b.date);return ad<bd?1:ad>bd?-1:0;});}
+function rangeEntriesForChar(charId){return S.dailyLedger.filter(function(e){return e.character===charId&&e.rangeStart;});}
+// "Effective" per-day value for charts. Daily entry takes precedence over any range covering that date.
+// If there's no daily entry, distribute range values evenly across their days.
+function getEffectiveDaily(charId,date){
+  var d=getDailyEntry(charId,date);
+  if(d){return {gmv:Number(d.gmv)||0,itemsSold:Number(d.itemsSold)||0,commission:Number(d.commission)||0};}
+  var r={gmv:0,itemsSold:0,commission:0};
+  rangeEntriesForChar(charId).forEach(function(e){
+    var rs=e.rangeStart,re=e.rangeEnd||e.date;
+    if(date<rs||date>re)return;
+    var days=Math.round((new Date(re)-new Date(rs))/86400000)+1;
+    if(days<=0)return;
+    r.gmv+=(Number(e.gmv)||0)/days;
+    r.itemsSold+=(Number(e.itemsSold)||0)/days;
+    r.commission+=(Number(e.commission)||0)/days;
+  });
+  return r;
+}
 function ledgerSpent(e){if(e==null||e.startBalance==null||e.endBalance==null)return null;return e.startBalance-e.endBalance;}
 function videoCreditsOnDate(charId,date){return S.videos.filter(function(v){return v.character===charId&&v.date===date;}).reduce(function(a,v){return a+tc(v);},0);}
 function setLedgerField(charId,date,field,raw){
@@ -414,6 +433,13 @@ function setLedgerField(charId,date,field,raw){
   save();render();
 }
 function deleteLedgerEntry(id){var idx=S.dailyLedger.findIndex(function(e){return e.id===id;});if(idx<0)return;var snap=S.dailyLedger[idx];S.dailyLedger.splice(idx,1);pushUndo(function(){S.dailyLedger.push(snap);},function(){S.dailyLedger=S.dailyLedger.filter(function(e){return e.id!==id;});},'deleted ledger '+snap.date);logH('delete','deleted ledger entry '+snap.date+' for '+snap.character);save();render();showToast('ledger entry deleted','muted');}
+function setLedgerEntryField(id,field,raw){
+  var val=raw==null||raw===''?null:Number(raw);if(isNaN(val))val=null;
+  var e=S.dailyLedger.find(function(x){return x.id===id;});if(!e)return;
+  var oldVal=e[field];e[field]=val;
+  pushUndo(function(){var x=S.dailyLedger.find(function(y){return y.id===id;});if(x)x[field]=oldVal;},function(){var x=S.dailyLedger.find(function(y){return y.id===id;});if(x)x[field]=val;},'range ledger '+(e.rangeStart||e.date)+' '+field+'='+(val==null?'—':val));
+  logH('edit','range ledger '+field+'='+(val==null?'—':val));save();render();
+}
 function toggleLedgerExpand(){S.ledgerExpanded=!S.ledgerExpanded;render();}
 function statusFilterRow(){
   var f=S.statusFilter||'all';
@@ -511,7 +537,7 @@ function renderRevenueChart(){
   var chars=activeChars();
   if(!chars.length||!S.dailyLedger.length)return '';
   // Per-char daily commission from ledger
-  var series=chars.map(function(c){return {label:c.name,color:c.color,data:dates.map(function(d){var e=getDailyEntry(c.id,d);return e&&Number(e.commission)?Number(e.commission):0;})};});
+  var series=chars.map(function(c){return {label:c.name,color:c.color,data:dates.map(function(d){return getEffectiveDaily(c.id,d).commission;})};});
   var allVals=[].concat.apply([],series.map(function(s){return s.data;}));
   var maxVal=Math.max.apply(null,allVals);
   if(maxVal<=0)return '';
@@ -834,25 +860,23 @@ function saveTtsToLedger(force){
     logH('import','TTS screenshot → '+date+' for '+charId);
     showToast('saved to '+date,'green');
   }else{
+    // Range mode: save ONE aggregate entry covering the date range. Don't fake daily granularity.
     var sd=S.ttsModal.startDate,ed=S.ttsModal.endDate;
     if(!sd||!ed||sd>ed){showToast('invalid date range','red');return;}
-    var dates=[];var cur=new Date(sd);var endD=new Date(ed);
-    while(cur<=endD){dates.push(cur.toISOString().slice(0,10));cur.setDate(cur.getDate()+1);}
-    if(!dates.length){showToast('invalid date range','red');return;}
-    var openDates=dates.filter(function(d){var e=getDailyEntry(charId,d);return !e||(e.gmv==null&&e.itemsSold==null&&e.commission==null);});
-    var skipped=dates.length-openDates.length;
-    if(!openDates.length){showToast('all '+dates.length+' days already have data — clear them or use single mode','red');return;}
-    var perDay={};
-    if(gmv!=null)perDay.gmv=Math.round((gmv/openDates.length)*100)/100;
-    if(items!=null)perDay.itemsSold=Math.round(items/openDates.length);
-    if(commission!=null)perDay.commission=Math.round((commission/openDates.length)*100)/100;
-    var snapshots=openDates.map(function(d){var e=getDailyEntry(charId,d);return {date:d,hadBefore:!!e,prev:e?{gmv:e.gmv,itemsSold:e.itemsSold,commission:e.commission}:null};});
-    openDates.forEach(function(d){upsertDailyEntry(charId,d,perDay);});
-    pushUndo(function(){snapshots.forEach(function(s){if(!s.hadBefore){S.dailyLedger=S.dailyLedger.filter(function(e){return !(e.character===charId&&e.date===s.date);});}else{var e=getDailyEntry(charId,s.date);if(e&&s.prev)Object.assign(e,s.prev);}});},function(){openDates.forEach(function(d){upsertDailyEntry(charId,d,perDay);});},'TTS range import: '+sd+' to '+ed);
-    logH('import','TTS range → '+openDates.length+' days for '+charId);
-    var msg='distributed across '+openDates.length+' day'+(openDates.length>1?'s':'');
-    if(skipped)msg+=' ('+skipped+' skipped — already had data)';
-    showToast(msg,'green');
+    var dayCount=Math.round((new Date(ed)-new Date(sd))/86400000)+1;
+    var existing=S.dailyLedger.find(function(e){return e.character===charId&&e.rangeStart===sd&&(e.rangeEnd||e.date)===ed;});
+    if(existing){
+      var prev={gmv:existing.gmv,itemsSold:existing.itemsSold,commission:existing.commission};
+      if(gmv!=null)existing.gmv=gmv;if(items!=null)existing.itemsSold=items;if(commission!=null)existing.commission=commission;
+      pushUndo(function(){Object.assign(existing,prev);},function(){if(gmv!=null)existing.gmv=gmv;if(items!=null)existing.itemsSold=items;if(commission!=null)existing.commission=commission;},'TTS range update: '+sd+' to '+ed);
+      showToast('updated '+dayCount+'-day range','green');
+    }else{
+      var entry={id:Date.now()+Math.floor(Math.random()*9999),character:charId,date:ed,rangeStart:sd,rangeEnd:ed,startBalance:null,endBalance:null,gmv:gmv,itemsSold:items,commission:commission,note:''};
+      S.dailyLedger.push(entry);
+      pushUndo(function(){S.dailyLedger=S.dailyLedger.filter(function(e){return e.id!==entry.id;});},function(){S.dailyLedger.push(entry);},'TTS range import: '+sd+' to '+ed);
+      showToast(dayCount+'-day range saved as one entry','green');
+    }
+    logH('import','TTS range → '+sd+' to '+ed+' ('+dayCount+' days) for '+charId);
   }
   save();closeTtsModal();render();
 }
@@ -970,9 +994,10 @@ function renderDailyLedger(charId){
   var c=gc(charId);var today=todayStr();
   var todayEntry=getDailyEntry(charId,today)||{character:charId,date:today,startBalance:null,endBalance:null,gmv:null,itemsSold:null,commission:null,id:null};
   var allEntries=dailyEntriesForChar(charId);
-  var pastEntries=allEntries.filter(function(e){return e.date!==today;});
+  var pastEntries=allEntries.filter(function(e){return e.date!==today||e.rangeStart;});
   var expanded=!!S.ledgerExpanded;
   function numCell(date,field,val,prefix,w){var width=w||90;return (prefix?'<span class="muted" style="font-size:11px;margin-right:1px">'+prefix+'</span>':'')+'<input type="number" min="0" step="any" value="'+(val==null?'':val)+'" placeholder="—" onchange="setLedgerField(\''+charId+'\',\''+date+'\',\''+field+'\',this.value)" class="inp" style="width:'+width+'px;text-align:right;font-variant-numeric:tabular-nums;padding:5px 8px;font-size:12px">';}
+  function rangeNumCell(eid,field,val,w){var width=w||90;return '<input type="number" min="0" step="any" value="'+(val==null?'':val)+'" placeholder="—" onchange="setLedgerEntryField('+eid+',\''+field+'\',this.value)" class="inp" style="width:'+width+'px;text-align:right;font-variant-numeric:tabular-nums;padding:5px 8px;font-size:12px">';}
   function spentCell(e){var s=ledgerSpent(e);if(s==null)return '<span class="muted" style="font-size:12px">—</span>';var v=videoCreditsOnDate(e.character,e.date);var diff=Math.abs(s-v);var warn=v>0&&diff>10&&(diff/v)>0.1;var col=s<0?'#e24b4a':'var(--text)';return '<span style="font-size:13px;font-weight:500;color:'+col+'">'+s+' cr</span>'+(warn?' <span title="ledger says '+s+' · videos sum to '+v+' for this date" style="color:#BA7517;font-size:12px;cursor:help">⚠</span>':'');}
   function row(date,e,isToday){
     var label=isToday?'today · '+date:date;
@@ -981,8 +1006,23 @@ function renderDailyLedger(charId){
     var revenueRow='<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:5px"><span class="muted" style="font-size:11px;min-width:50px">revenue</span><span class="muted" style="font-size:11px">GMV $</span>'+numCell(date,'gmv',e.gmv,null,80)+'<span class="muted" style="font-size:11px;margin-left:4px">items</span>'+numCell(date,'itemsSold',e.itemsSold,null,60)+'<span class="muted" style="font-size:11px;margin-left:4px">commission $</span>'+numCell(date,'commission',e.commission,null,80)+'</div>';
     return '<div style="padding:9px 0;border-bottom:0.5px solid var(--row-div)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px"><span class="muted" style="font-size:12px;font-variant-numeric:tabular-nums;font-weight:'+(isToday?'500':'400')+';color:'+(isToday?'var(--text)':'var(--text2)')+'">'+label+'</span>'+del+'</div>'+creditsRow+revenueRow+'</div>';
   }
+  function rangeRow(e){
+    var rs=e.rangeStart,re=e.rangeEnd||e.date;
+    var days=Math.round((new Date(re)-new Date(rs))/86400000)+1;
+    var del='<button onclick="deleteLedgerEntry('+e.id+')" class="del-x" title="delete entry">×</button>';
+    var label='<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-variant-numeric:tabular-nums;color:var(--text2)"><span style="background:#7F77DD22;color:#7F77DD;border:0.5px solid #7F77DD55;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:500">range</span><span>'+rs+' → '+re+'</span><span class="muted" style="font-size:11px">'+days+'-day total</span></span>';
+    var revenueRow='<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px"><span class="muted" style="font-size:11px;min-width:50px">revenue</span><span class="muted" style="font-size:11px">GMV $</span>'+rangeNumCell(e.id,'gmv',e.gmv,80)+'<span class="muted" style="font-size:11px;margin-left:4px">items</span>'+rangeNumCell(e.id,'itemsSold',e.itemsSold,60)+'<span class="muted" style="font-size:11px;margin-left:4px">commission $</span>'+rangeNumCell(e.id,'commission',e.commission,80)+'</div>';
+    var perDayHint='';
+    if(e.commission!=null||e.gmv!=null||e.itemsSold!=null){
+      var bits=[];
+      if(e.gmv!=null)bits.push('~'+fmtUSD(e.gmv/days)+'/day GMV');
+      if(e.commission!=null)bits.push('~'+fmtUSD(e.commission/days)+'/day commission');
+      if(bits.length)perDayHint='<div class="muted" style="font-size:10px;margin-top:4px">'+bits.join(' · ')+' (estimate, distributed evenly across '+days+' days for charts)</div>';
+    }
+    return '<div style="padding:9px 0;border-bottom:0.5px solid var(--row-div);background:#7F77DD08"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">'+label+del+'</div>'+revenueRow+perDayHint+'</div>';
+  }
   var todayRow=row(today,todayEntry,true);
-  var pastRows=expanded?pastEntries.map(function(e){return row(e.date,e,false);}).join(''):'';
+  var pastRows=expanded?pastEntries.map(function(e){return e.rangeStart?rangeRow(e):row(e.date,e,false);}).join(''):'';
   var uploadBtn='<button onclick="openTtsModal(\''+charId+'\')" class="btn-ghost" style="padding:5px 10px;font-size:11px;border-radius:6px">upload tts screenshot</button>';
   var toggleBtn=pastEntries.length?'<button onclick="toggleLedgerExpand()" class="btn-ghost" style="padding:5px 10px;font-size:11px;border-radius:6px">'+(expanded?'hide history':'show '+pastEntries.length+' past day'+(pastEntries.length>1?'s':''))+'</button>':'';
   return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:10px;flex-wrap:wrap"><div><div class="sl">daily ledger — '+c.name+'</div><div class="muted" style="font-size:10px;margin-top:2px">credits + revenue from your tts dashboard · ⚠ flags ledger/video mismatch · USD</div></div><div style="display:flex;gap:6px;flex-wrap:wrap">'+uploadBtn+toggleBtn+'</div></div>'+todayRow+pastRows+'</div>';
@@ -1266,8 +1306,8 @@ function earnRangeDates(range){
 }
 function earnSeriesForChar(charId,dates,metric){
   return dates.map(function(d){
-    if(metric==='gmv'){var e=getDailyEntry(charId,d);return e&&Number(e.gmv)?Number(e.gmv):0;}
-    if(metric==='commission'){var e2=getDailyEntry(charId,d);return e2&&Number(e2.commission)?Number(e2.commission):0;}
+    if(metric==='gmv')return getEffectiveDaily(charId,d).gmv;
+    if(metric==='commission')return getEffectiveDaily(charId,d).commission;
     if(metric==='videos'){return S.videos.filter(function(v){return v.character===charId&&v.date===d&&v.posted===true;}).length;}
     return 0;
   });
