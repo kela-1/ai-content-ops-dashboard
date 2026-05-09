@@ -2,7 +2,7 @@
 
 A self-contained tracking + library + prompt-assembler dashboard for AI character video productions. Originally built for TikTok Shop affiliate workflows, but works for any AI video pipeline (Amazon affiliate content, AI influencer accounts, etc).
 
-**Live: [https://YOUR-USERNAME.github.io/ai-content-ops-dashboard/](#)** *(replace this link after enabling GitHub Pages)*
+**Live: [https://kela-1.github.io/ai-content-ops-dashboard/](https://kela-1.github.io/ai-content-ops-dashboard/)**
 
 ---
 
