@@ -113,6 +113,7 @@ input,select,textarea{font-family:inherit}
     <button class="nav-btn" onclick="setView('motions')">motions</button>
     <button class="nav-btn" onclick="setView('angles')">angles</button>
     <button class="nav-btn" onclick="setView('generate')">generate</button>
+    <button class="nav-btn" onclick="setView('earnings')">earnings</button>
     <button class="nav-btn" onclick="setView('import')">import data</button>
     <button class="nav-btn" onclick="setView('tools')">tools</button>
     <button class="nav-btn" onclick="setView('settings')">settings</button>
@@ -147,6 +148,7 @@ var S={
   ],
   videos:[],products:[],backgrounds:[],motions:[],angles:[],dailyLedger:[],ledgerExpanded:false,
   gen:{character:null,background:null,motion:null,angle:null,products:[]},blueprints:[],savingBlueprint:null,
+  earnRange:'thisMonth',earnMetric:'commission',
   bgTags:['City','Night','Bedroom','Gym','Bathroom','Mirror'],
   prodCats:['tops','pants','shoes','jewelry','accessories','other'],
   prodTags:['black','white','red','blue','green','hoodie','dress','casual','sport'],
@@ -155,7 +157,7 @@ var S={
 };
 var HISTORY=[],UNDO_STACK=[],REDO_STACK=[];
 
-function save(){try{var d=JSON.parse(JSON.stringify(S));delete d.view;delete d.editingVideo;delete d.editingProduct;delete d.editingBg;delete d.editingMotion;delete d.editingAngle;delete d.ptf;delete d.statusFilter;delete d.pfav;delete d.bgFav;delete d.mtf;delete d.atf;delete d.mfav;delete d.afav;delete d.savingBlueprint;localStorage.setItem(STORE_KEY,JSON.stringify(d));}catch(e){}}
+function save(){try{var d=JSON.parse(JSON.stringify(S));delete d.view;delete d.editingVideo;delete d.editingProduct;delete d.editingBg;delete d.editingMotion;delete d.editingAngle;delete d.ptf;delete d.statusFilter;delete d.pfav;delete d.bgFav;delete d.mtf;delete d.atf;delete d.mfav;delete d.afav;delete d.savingBlueprint;delete d.ttsModal;localStorage.setItem(STORE_KEY,JSON.stringify(d));}catch(e){}}
 function saveHistory(){try{localStorage.setItem(HIST_KEY,JSON.stringify(HISTORY.slice(0,1000)));}catch(e){}}
 function load(){
   try{
@@ -177,7 +179,7 @@ function load(){
       S.products.forEach(function(p){if(!p.tags)p.tags=[];});
       S.backgrounds.forEach(function(b){if(!b.tags)b.tags=[];});
       // Migrate: posted field defaults to null (unknown) for older videos; engagement fields default to null
-      S.videos.forEach(function(v){if(!('posted' in v))v.posted=null;if(!('revenue' in v))v.revenue=null;['views','likes','comments','shares','saves'].forEach(function(k){if(!(k in v))v[k]=null;});});
+      S.videos.forEach(function(v){if(!('posted' in v))v.posted=null;if(!('revenue' in v))v.revenue=null;['views','likes','comments','shares','saves','totalPlayTime','avgWatchTime','watchFullPct','newFollowers'].forEach(function(k){if(!(k in v))v[k]=null;});});
       if(!Array.isArray(S.blueprints))S.blueprints=[];
       if(!Array.isArray(S.dailyLedger))S.dailyLedger=[];
       // Revenue migration on ledger
@@ -214,7 +216,7 @@ function toggleTheme(){S.theme=S.theme==='dark'?'light':'dark';save();render();}
 
 function setView(v){
   S.view=v;S.editingVideo=null;S.editingProduct=null;S.editingBg=null;S.editingMotion=null;S.editingAngle=null;
-  document.querySelectorAll('.nav-btn').forEach(function(btn){var map={'overview':'overview','characters':'characters','products':'products','motions':'motions','angles':'angles','generate':'generate','import data':'import','tools':'tools','settings':'settings','history':'history'};btn.classList.toggle('active',map[btn.textContent.trim()]===v);});
+  document.querySelectorAll('.nav-btn').forEach(function(btn){var map={'overview':'overview','characters':'characters','products':'products','motions':'motions','angles':'angles','generate':'generate','earnings':'earnings','import data':'import','tools':'tools','settings':'settings','history':'history'};btn.classList.toggle('active',map[btn.textContent.trim()]===v);});
   render();
 }
 
@@ -540,6 +542,326 @@ function renderEfficiencyBars(){
   return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px"><div class="sl" style="margin-bottom:4px">credit efficiency — posted vs trashed</div><div class="muted" style="font-size:10px;margin-bottom:8px">where did each character\'s credits go? <span style="color:#1D9E75">green</span> = posted · <span style="color:#BA7517">amber</span> = unposted · <span style="color:#e24b4a">red</span> = trashed</div>'+rows+'</div>';
 }
 
+// === TTS Screenshot OCR (Tesseract.js, lazy-loaded) ===
+var tesseractPromise=null;
+function ensureTesseract(){
+  if(tesseractPromise)return tesseractPromise;
+  tesseractPromise=new Promise(function(resolve,reject){
+    if(window.Tesseract){resolve(window.Tesseract);return;}
+    var s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+    s.onload=function(){resolve(window.Tesseract);};
+    s.onerror=function(){tesseractPromise=null;reject(new Error('failed to load OCR engine — check internet'));};
+    document.head.appendChild(s);
+  });
+  return tesseractPromise;
+}
+function parseAmount(numStr,suffix){
+  if(numStr==null)return null;
+  var n=parseFloat(String(numStr).replace(/,/g,''));
+  if(isNaN(n))return null;
+  if(suffix){var s=String(suffix).toLowerCase();if(s==='k')return n*1000;if(s==='m')return n*1000000;}
+  return n;
+}
+function parseNumWithSuffix(s){if(!s)return null;var m=String(s).match(/([\d,.]+)\s*([kKmM])?/);if(!m)return null;return parseAmount(m[1],m[2]);}
+
+// Classify what type of TTS/TikTok screenshot this is from OCR text.
+function detectScreenshotType(text){
+  var t=text.toLowerCase();
+  // Per-video signals (TikTok Studio video analysis page)
+  if(/(video\s+views|total\s+play\s+time|est(?:imated)?\s+rewards|average\s+watch\s+time|watched\s+full\s+video|new\s+followers)/.test(t))return 'video';
+  // Daily aggregate signals (TTS Shop home / Data view)
+  if(/((?:attr\.?|commission)\s*gmv|items?\s+sold|est(?:\.|imated)?\s+commissions?|commission\s+base)/.test(t))return 'daily';
+  return 'unknown';
+}
+
+// Parse a TTS Shop daily-aggregate screenshot
+function parseDailyScreenshot(text){
+  var t=text.replace(/[\r\n]+/g,' ').replace(/\s+/g,' ');
+  var gmvMatch=t.match(/(?:attr\.?|commission)?\s*gmv[^$]{0,40}\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM])?/i);
+  var itemsMatch=t.match(/items?\s+sold[^\d]{0,40}([\d,]+)\b/i);
+  // Require "est." prefix so we don't false-match the "Commissions" tab label near a GMV value.
+  var commMatch=t.match(/est(?:\.|imated)?\s+commissions?[^$]{0,40}\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM])?/i);
+  // Date detection
+  var dateInfo={mode:null,date:null,startDate:null,endDate:null};
+  var rangeMatch=t.match(/([a-z]+\s+\d+,?\s+\d{4})\s*[-–—]\s*([a-z]+\s+\d+,?\s+\d{4})/i);
+  if(rangeMatch){
+    var sd=new Date(rangeMatch[1]);var ed=new Date(rangeMatch[2]);
+    if(!isNaN(sd.getTime())&&!isNaN(ed.getTime())){dateInfo.mode='range';dateInfo.startDate=sd.toISOString().slice(0,10);dateInfo.endDate=ed.toISOString().slice(0,10);}
+  }
+  if(!dateInfo.mode){
+    var singleMatch=t.match(/([a-z]+\s+\d+,?\s+\d{4})\s*(?:\(GMT|$|\s)/i);
+    if(singleMatch){var d=new Date(singleMatch[1]);if(!isNaN(d.getTime())){dateInfo.mode='single';dateInfo.date=d.toISOString().slice(0,10);}}
+  }
+  return {gmv:gmvMatch?parseAmount(gmvMatch[1],gmvMatch[2]):null,itemsSold:itemsMatch?(parseInt(itemsMatch[1].replace(/,/g,''))||null):null,commission:commMatch?parseAmount(commMatch[1],commMatch[2]):null,dateInfo:dateInfo,rawText:text};
+}
+
+// Parse a TikTok Studio per-video analysis screenshot
+function parseVideoScreenshot(text){
+  var t=text.replace(/[\r\n]+/g,' ').replace(/\s+/g,' ');
+  function num(re,asInt){var m=t.match(re);if(!m)return null;var v=String(m[1]||'').replace(/,/g,'');var n=asInt?parseInt(v):parseFloat(v);return isNaN(n)?null:n;}
+  var views=num(/video\s+views[\s\S]{0,40}?([\d,]+)/i,true);
+  // Lazy gap because OCR may put "Video views" and "Total play time" labels first, then their values second.
+  var totalPlayTime=(t.match(/total\s+play\s+time[\s\S]{0,80}?(\d+h:\d+m:\d+s|\d+h:\d+m|\d+m:\d+s|\d+h|\d+m|\d{2,}s)/i)||[])[1]||null;
+  var avgWatchTime=(t.match(/average\s+watch\s+time[\s\S]{0,80}?([\d.]+\s*[smh])/i)||[])[1]||null;
+  // Require % so we don't grab the avg-watch-time number ("0.6s") by mistake.
+  var watchFullPct=num(/watched\s+full\s+video[^%]{0,80}?([\d.]+)\s*%/i,false);
+  var newFollowers=num(/new\s+followers?[^\d]{0,30}([\d,]+)/i,true);
+  var commMatch=t.match(/est(?:\.|imated)?\s+rewards?[^$]{0,30}\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM])?/i);
+  var commission=commMatch?parseAmount(commMatch[1],commMatch[2]):null;
+  // Posted date: "Posted on Feb 26, 2026, 8:16 PM"
+  var postedMatch=t.match(/posted\s+on\s+([a-z]+\s+\d+,?\s+\d{4})/i);
+  var postedDate=null;
+  if(postedMatch){var pd=new Date(postedMatch[1]);if(!isNaN(pd.getTime()))postedDate=pd.toISOString().slice(0,10);}
+  // Engagement row: 5 numbers between the post-time and the tab labels (Inspiration|Overview|Viewers|Engagement)
+  var likes=null,comments=null,shares=null,saves=null;
+  var engM=t.match(/(?:AM|PM)\s+([\d.,]+\s*[KkMm]?)\s+([\d.,]+\s*[KkMm]?)\s+([\d.,]+\s*[KkMm]?)\s+([\d.,]+\s*[KkMm]?)\s+([\d.,]+\s*[KkMm]?)\s+(?:Inspiration|Overview|Viewers|Engagement)/i);
+  if(engM){
+    // engM[1] = top-row views (often "88K"), then likes/comments/shares/saves
+    likes=parseNumWithSuffix(engM[2]);
+    comments=parseNumWithSuffix(engM[3]);
+    shares=parseNumWithSuffix(engM[4]);
+    saves=parseNumWithSuffix(engM[5]);
+  }
+  return {views:views,likes:likes,comments:comments,shares:shares,saves:saves,totalPlayTime:totalPlayTime,avgWatchTime:avgWatchTime,watchFullPct:watchFullPct,newFollowers:newFollowers,commission:commission,postedDate:postedDate,rawText:text};
+}
+
+// Compatibility shim — older code may still call parseTtsText
+function parseTtsText(text){return parseDailyScreenshot(text);}
+
+function openTtsModal(charId){
+  S.ttsModal={charId:charId,step:'pick',detectedType:null,mode:'single',date:todayStr(),startDate:'',endDate:todayStr(),imageDataUrl:null,processing:false,progress:'',extracted:null,error:null,videoMatchId:'new',videoTitle:''};
+  document.getElementById('modal-wrap').style.display='flex';
+  renderTtsModal();
+}
+function closeTtsModal(){S.ttsModal=null;document.getElementById('modal-wrap').style.display='none';}
+function setTtsField(f,v){
+  if(!S.ttsModal)return;
+  S.ttsModal[f]=v;
+  if(f==='mode'&&v==='range'&&!S.ttsModal.startDate){var end=todayStr();var sd=new Date();sd.setDate(sd.getDate()-6);S.ttsModal.startDate=sd.toISOString().slice(0,10);S.ttsModal.endDate=end;}
+  renderTtsModal();
+}
+function setTtsImage(file){
+  if(!file||!file.type||!file.type.startsWith('image/'))return;
+  var reader=new FileReader();
+  reader.onload=function(e){if(S.ttsModal){S.ttsModal.imageDataUrl=e.target.result;renderTtsModal();}};
+  reader.readAsDataURL(file);
+}
+function processTtsImage(){
+  if(!S.ttsModal||!S.ttsModal.imageDataUrl)return;
+  S.ttsModal.processing=true;S.ttsModal.step='processing';S.ttsModal.error=null;S.ttsModal.progress='loading OCR engine…';
+  renderTtsModal();
+  ensureTesseract().then(function(T){
+    S.ttsModal.progress='reading screenshot…';renderTtsModal();
+    return T.recognize(S.ttsModal.imageDataUrl,'eng',{logger:function(m){if(m&&m.status==='recognizing text'&&S.ttsModal){S.ttsModal.progress='reading screenshot ('+Math.round((m.progress||0)*100)+'%)';}}});
+  }).then(function(result){
+    if(!S.ttsModal)return;
+    var rawText=result.data.text;
+    var type=detectScreenshotType(rawText);
+    S.ttsModal.detectedType=type;
+    if(type==='video'){
+      S.ttsModal.extracted=parseVideoScreenshot(rawText);
+      // Auto-suggest matching video by character + posted date
+      var pd=S.ttsModal.extracted.postedDate;
+      if(pd){
+        var match=S.videos.find(function(v){return v.character===S.ttsModal.charId&&v.date===pd;});
+        if(match){S.ttsModal.videoMatchId=match.id;S.ttsModal.videoTitle=match.title||'';}
+      }
+    } else if(type==='daily'){
+      S.ttsModal.extracted=parseDailyScreenshot(rawText);
+      // Apply detected dates / mode if found
+      var di=S.ttsModal.extracted.dateInfo;
+      if(di&&di.mode){
+        S.ttsModal.mode=di.mode;
+        if(di.mode==='single')S.ttsModal.date=di.date;
+        else{S.ttsModal.startDate=di.startDate;S.ttsModal.endDate=di.endDate;}
+      }
+    } else {
+      // Unknown — show daily form by default and let user fill manually
+      S.ttsModal.detectedType='daily';
+      S.ttsModal.extracted={gmv:null,itemsSold:null,commission:null,rawText:rawText,dateInfo:null};
+    }
+    S.ttsModal.step='confirm';S.ttsModal.processing=false;
+    renderTtsModal();
+  }).catch(function(e){
+    if(!S.ttsModal)return;
+    S.ttsModal.processing=false;S.ttsModal.step='pick';S.ttsModal.error=(e&&e.message)||'OCR failed';
+    renderTtsModal();
+  });
+}
+function saveTtsToLedger(){
+  if(!S.ttsModal||!S.ttsModal.extracted)return;
+  var charId=S.ttsModal.charId;
+  function rdNum(id,asInt){var el=document.getElementById(id);if(!el||el.value===''||el.value==null)return null;var n=asInt?parseInt(el.value):Number(el.value);return isNaN(n)?null:n;}
+  function rdStr(id){var el=document.getElementById(id);if(!el)return null;var v=String(el.value||'').trim();return v||null;}
+
+  // VIDEO save path
+  if(S.ttsModal.detectedType==='video'){
+    var fields={
+      views:rdNum('tts-v-views',true),
+      likes:rdNum('tts-v-likes',true),
+      comments:rdNum('tts-v-comments',true),
+      shares:rdNum('tts-v-shares',true),
+      saves:rdNum('tts-v-saves',true),
+      revenue:rdNum('tts-v-rev',false),
+      avgWatchTime:rdStr('tts-v-avg'),
+      watchFullPct:rdNum('tts-v-pct',false),
+      newFollowers:rdNum('tts-v-followers',true),
+      totalPlayTime:rdStr('tts-v-total')
+    };
+    var matchSel=document.getElementById('tts-v-match');
+    var matchVal=matchSel?matchSel.value:'new';
+    var titleEl=document.getElementById('tts-v-title');
+    var title=titleEl?String(titleEl.value||'').trim():'';
+    var dateEl=document.getElementById('tts-v-date');
+    var pdate=dateEl?dateEl.value:S.ttsModal.extracted.postedDate||todayStr();
+    if(matchVal==='new'){
+      if(!title){showToast('enter a video title','red');return;}
+      var newV=Object.assign({id:Date.now(),character:charId,title:title,date:pdate,productLinks:[],background:'',imageCount:0,imageCredits:0,videoCount:1,videoCredits:0,posted:true,tags:[]},fields);
+      S.videos.push(newV);
+      var nid=newV.id;
+      pushUndo(function(){S.videos=S.videos.filter(function(v){return v.id!==nid;});},function(){S.videos.push(newV);},'video screenshot → new: '+title);
+      logH('import','video screenshot → new: '+title);
+      showToast('created new video '+title,'green');
+    } else {
+      var vid=Number(matchVal);var v=S.videos.find(function(x){return x.id===vid;});
+      if(!v){showToast('video not found','red');return;}
+      var snap={};Object.keys(fields).forEach(function(k){snap[k]=v[k];});
+      // Apply non-null fields only (preserve existing if OCR missed them and user didn't fill)
+      Object.keys(fields).forEach(function(k){if(fields[k]!=null)v[k]=fields[k];});
+      if(title&&title!==v.title)v.title=title;
+      if(pdate&&pdate!==v.date)v.date=pdate;
+      pushUndo(function(){Object.assign(v,snap);},function(){Object.keys(fields).forEach(function(k){if(fields[k]!=null)v[k]=fields[k];});},'video screenshot → '+(v.title||v.id));
+      logH('import','video screenshot → '+(v.title||v.id));
+      showToast('updated '+(v.title||'video'),'green');
+    }
+    save();closeTtsModal();render();return;
+  }
+
+  // DAILY save path (existing logic)
+  var gmv=rdNum('tts-gmv',false),items=rdNum('tts-items',true),commission=rdNum('tts-comm',false);
+  if(gmv==null&&items==null&&commission==null){showToast('nothing to save — fill at least one field','red');return;}
+  if(S.ttsModal.mode==='single'){
+    var date=S.ttsModal.date;
+    var existing=getDailyEntry(charId,date);var hadBefore=!!existing;
+    var prevSnap=existing?{gmv:existing.gmv,itemsSold:existing.itemsSold,commission:existing.commission}:null;
+    var patch={};if(gmv!=null)patch.gmv=gmv;if(items!=null)patch.itemsSold=items;if(commission!=null)patch.commission=commission;
+    upsertDailyEntry(charId,date,patch);
+    pushUndo(function(){if(!hadBefore){S.dailyLedger=S.dailyLedger.filter(function(e){return !(e.character===charId&&e.date===date);});}else{var e=getDailyEntry(charId,date);if(e&&prevSnap)Object.assign(e,prevSnap);}},function(){upsertDailyEntry(charId,date,patch);},'TTS import: '+date);
+    logH('import','TTS screenshot → '+date+' for '+charId);
+    showToast('saved to '+date,'green');
+  }else{
+    var sd=S.ttsModal.startDate,ed=S.ttsModal.endDate;
+    if(!sd||!ed||sd>ed){showToast('invalid date range','red');return;}
+    var dates=[];var cur=new Date(sd);var endD=new Date(ed);
+    while(cur<=endD){dates.push(cur.toISOString().slice(0,10));cur.setDate(cur.getDate()+1);}
+    if(!dates.length){showToast('invalid date range','red');return;}
+    var openDates=dates.filter(function(d){var e=getDailyEntry(charId,d);return !e||(e.gmv==null&&e.itemsSold==null&&e.commission==null);});
+    var skipped=dates.length-openDates.length;
+    if(!openDates.length){showToast('all '+dates.length+' days already have data — clear them or use single mode','red');return;}
+    var perDay={};
+    if(gmv!=null)perDay.gmv=Math.round((gmv/openDates.length)*100)/100;
+    if(items!=null)perDay.itemsSold=Math.round(items/openDates.length);
+    if(commission!=null)perDay.commission=Math.round((commission/openDates.length)*100)/100;
+    var snapshots=openDates.map(function(d){var e=getDailyEntry(charId,d);return {date:d,hadBefore:!!e,prev:e?{gmv:e.gmv,itemsSold:e.itemsSold,commission:e.commission}:null};});
+    openDates.forEach(function(d){upsertDailyEntry(charId,d,perDay);});
+    pushUndo(function(){snapshots.forEach(function(s){if(!s.hadBefore){S.dailyLedger=S.dailyLedger.filter(function(e){return !(e.character===charId&&e.date===s.date);});}else{var e=getDailyEntry(charId,s.date);if(e&&s.prev)Object.assign(e,s.prev);}});},function(){openDates.forEach(function(d){upsertDailyEntry(charId,d,perDay);});},'TTS range import: '+sd+' to '+ed);
+    logH('import','TTS range → '+openDates.length+' days for '+charId);
+    var msg='distributed across '+openDates.length+' day'+(openDates.length>1?'s':'');
+    if(skipped)msg+=' ('+skipped+' skipped — already had data)';
+    showToast(msg,'green');
+  }
+  save();closeTtsModal();render();
+}
+function renderTtsModal(){
+  if(!S.ttsModal)return;
+  var inner=document.getElementById('modal-inner');if(!inner)return;
+  var st=S.ttsModal;var c=gc(st.charId);var charLabel=c?c.name:'?';
+  var hdr=function(t){return '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px"><div style="font-size:15px;font-weight:500;color:var(--text)">'+t+'</div><button onclick="closeTtsModal()" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--text2);line-height:1">×</button></div>';};
+  var lbl=function(t){return '<div style="font-size:11px;letter-spacing:0.4px;text-transform:uppercase;color:var(--text3);margin-bottom:5px">'+t+'</div>';};
+  if(st.step==='pick'){
+    var imagePart=st.imageDataUrl
+      ?'<div style="position:relative;margin-top:6px;border-radius:8px;overflow:hidden;border:0.5px solid var(--border)"><img src="'+st.imageDataUrl+'" style="width:100%;display:block;max-height:300px;object-fit:contain;background:var(--bg3)"><button onclick="setTtsField(\'imageDataUrl\',null)" style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,0.7);color:#fff;border:none;width:24px;height:24px;border-radius:50%;cursor:pointer;font-size:14px;font-family:inherit">×</button></div>'
+      :'<div id="tts-dz" tabindex="0" style="margin-top:6px;border-radius:8px;padding:32px;text-align:center;cursor:pointer;background:var(--dz-bg);border:1.5px dashed var(--dz-border);color:var(--dz-color);outline:none"><div style="font-size:13px;margin-bottom:3px">drop screenshot</div><div style="font-size:11px;opacity:0.6">click to browse · cmd+v to paste</div></div><input type="file" accept="image/*" id="fi-tts-dz" style="display:none" onchange="if(this.files[0])setTtsImage(this.files[0])">';
+    var canProcess=!!st.imageDataUrl;
+    var processBtn='<button onclick="processTtsImage()" '+(canProcess?'':'disabled ')+'class="btn-primary" style="width:100%;padding:10px;font-size:13px;border-radius:8px'+(canProcess?'':';opacity:0.4;cursor:not-allowed')+'">process screenshot</button>';
+    var errMsg=st.error?'<div style="color:#e24b4a;font-size:12px;margin-top:8px">'+st.error+'</div>':'';
+    inner.innerHTML=hdr('upload screenshot — '+charLabel)+'<div style="display:flex;flex-direction:column;gap:11px">'+imagePart+processBtn+errMsg+'<div class="muted" style="font-size:11px;line-height:1.6"><strong style="color:var(--text)">supports both:</strong><br>· tiktok shop dashboard (GMV, items, commission for a date or range)<br>· tiktok studio per-video analysis (views, likes, comments, shares, saves, est. rewards)<br><br>auto-detects which one. confirm/edit values in the next step.</div></div>';
+    setTimeout(function(){
+      var dz=document.getElementById('tts-dz');if(!dz)return;
+      dz.addEventListener('click',function(){var fi=document.getElementById('fi-tts-dz');if(fi)fi.click();});
+      dz.addEventListener('dragover',function(e){e.preventDefault();dz.classList.add('over');});
+      dz.addEventListener('dragleave',function(){dz.classList.remove('over');});
+      dz.addEventListener('drop',function(e){e.preventDefault();dz.classList.remove('over');var f=e.dataTransfer.files[0];if(f)setTtsImage(f);});
+      dz.addEventListener('paste',function(e){var it=(e.clipboardData||window.clipboardData).items;for(var i=0;i<it.length;i++){if(it[i].type.startsWith('image/')){e.preventDefault();setTtsImage(it[i].getAsFile());break;}}});
+    },0);
+  }else if(st.step==='processing'){
+    inner.innerHTML=hdr('processing — '+charLabel)+'<div style="text-align:center;padding:30px 0"><div style="font-size:14px;color:var(--text);margin-bottom:8px">'+(st.progress||'working…')+'</div><div class="muted" style="font-size:11px">first run downloads ~10MB of OCR data. cached after that — future runs are fast.</div></div>';
+  }else if(st.step==='confirm'){
+    var ex=st.extracted;
+    var typeBadge=st.detectedType==='video'?'<span style="color:#7F77DD;font-size:11px;background:#7F77DD22;border:0.5px solid #7F77DD55;padding:2px 8px;border-radius:20px">detected: per-video</span>':'<span style="color:#1D9E75;font-size:11px;background:#1D9E7522;border:0.5px solid #1D9E7555;padding:2px 8px;border-radius:20px">detected: daily aggregate</span>';
+
+    if(st.detectedType==='video'){
+      // Per-video confirmation form
+      var charVids=S.videos.filter(function(v){return v.character===st.charId;}).slice().sort(function(a,b){return b.date>a.date?1:-1;});
+      var matchOpts='<option value="new"'+(st.videoMatchId==='new'?' selected':'')+'>+ create new video</option>'+charVids.map(function(v){var s=String(v.id)===String(st.videoMatchId)?' selected':'';return '<option value="'+v.id+'"'+s+'>'+(v.title||'(untitled)')+' · '+v.date+'</option>';}).join('');
+      var defaultTitle=st.videoTitle||(st.videoMatchId&&st.videoMatchId!=='new'?(charVids.find(function(v){return String(v.id)===String(st.videoMatchId);})||{}).title:'')||'';
+      var pdate=ex.postedDate||todayStr();
+      inner.innerHTML=hdr('confirm — '+charLabel)+
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'+typeBadge+'</div>'+
+        '<div style="display:flex;flex-direction:column;gap:11px">'+
+        '<div>'+lbl('match to existing video')+'<select id="tts-v-match" class="inp" onchange="setTtsField(\'videoMatchId\',this.value)">'+matchOpts+'</select></div>'+
+        '<div>'+lbl('video title')+'<input type="text" id="tts-v-title" class="inp" value="'+defaultTitle.replace(/"/g,'&quot;')+'" placeholder="e.g. Black Dress Outfit Check"></div>'+
+        '<div>'+lbl('posted date')+'<input type="date" id="tts-v-date" class="inp" value="'+pdate+'"></div>'+
+        '<div style="height:1px;background:var(--border);margin:4px 0"></div>'+
+        '<div class="sl">engagement</div>'+
+        '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px">'+
+          '<div><div class="muted" style="font-size:10px;margin-bottom:2px">views</div><input type="number" id="tts-v-views" class="inp" value="'+(ex.views==null?'':ex.views)+'" placeholder="—"></div>'+
+          '<div><div class="muted" style="font-size:10px;margin-bottom:2px">likes</div><input type="number" id="tts-v-likes" class="inp" value="'+(ex.likes==null?'':ex.likes)+'" placeholder="—"></div>'+
+          '<div><div class="muted" style="font-size:10px;margin-bottom:2px">comments</div><input type="number" id="tts-v-comments" class="inp" value="'+(ex.comments==null?'':ex.comments)+'" placeholder="—"></div>'+
+          '<div><div class="muted" style="font-size:10px;margin-bottom:2px">shares</div><input type="number" id="tts-v-shares" class="inp" value="'+(ex.shares==null?'':ex.shares)+'" placeholder="—"></div>'+
+          '<div><div class="muted" style="font-size:10px;margin-bottom:2px">saves</div><input type="number" id="tts-v-saves" class="inp" value="'+(ex.saves==null?'':ex.saves)+'" placeholder="—"></div>'+
+        '</div>'+
+        '<div class="sl">performance</div>'+
+        '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">'+
+          '<div><div class="muted" style="font-size:10px;margin-bottom:2px">avg watch time</div><input type="text" id="tts-v-avg" class="inp" value="'+(ex.avgWatchTime||'')+'" placeholder="e.g. 0.6s"></div>'+
+          '<div><div class="muted" style="font-size:10px;margin-bottom:2px">watched full %</div><input type="number" step="any" id="tts-v-pct" class="inp" value="'+(ex.watchFullPct==null?'':ex.watchFullPct)+'" placeholder="e.g. 0.87"></div>'+
+          '<div><div class="muted" style="font-size:10px;margin-bottom:2px">total play time</div><input type="text" id="tts-v-total" class="inp" value="'+(ex.totalPlayTime||'')+'" placeholder="e.g. 69h:15m:5s"></div>'+
+          '<div><div class="muted" style="font-size:10px;margin-bottom:2px">new followers</div><input type="number" id="tts-v-followers" class="inp" value="'+(ex.newFollowers==null?'':ex.newFollowers)+'" placeholder="—"></div>'+
+        '</div>'+
+        '<div>'+lbl('est. rewards / commission ($)')+'<input type="number" step="any" id="tts-v-rev" class="inp" value="'+(ex.commission==null?'':ex.commission)+'" placeholder="—"></div>'+
+        '<div style="display:flex;gap:8px;margin-top:6px"><button onclick="saveTtsToLedger()" class="btn-primary" style="flex:1;padding:10px;font-size:13px;border-radius:8px">save</button><button onclick="setTtsField(\'step\',\'pick\')" class="btn-ghost" style="padding:10px 14px;font-size:13px;border-radius:8px">back</button></div>'+
+        '<details style="margin-top:6px"><summary class="muted" style="font-size:11px;cursor:pointer;outline:none">show raw OCR text</summary><pre style="background:var(--inp-bg);border:0.5px solid var(--border);border-radius:6px;padding:8px;font-size:10px;color:var(--text2);max-height:120px;overflow:auto;white-space:pre-wrap;margin-top:6px;font-family:monospace">'+(ex.rawText||'').replace(/</g,'&lt;')+'</pre></details>'+
+        '</div>';
+      return;
+    }
+
+    // Daily aggregate confirmation form (with mode toggle)
+    var modeToggle='<div style="display:flex;gap:6px;margin-bottom:10px;background:var(--inp-bg);padding:3px;border-radius:8px;border:0.5px solid var(--border)"><button onclick="setTtsField(\'mode\',\'single\')" style="flex:1;padding:6px;font-size:12px;border:none;border-radius:6px;cursor:pointer;font-family:inherit;background:'+(st.mode==='single'?'var(--btn-primary-bg)':'transparent')+';color:'+(st.mode==='single'?'var(--btn-primary-color)':'var(--text2)')+'">single date</button><button onclick="setTtsField(\'mode\',\'range\')" style="flex:1;padding:6px;font-size:12px;border:none;border-radius:6px;cursor:pointer;font-family:inherit;background:'+(st.mode==='range'?'var(--btn-primary-bg)':'transparent')+';color:'+(st.mode==='range'?'var(--btn-primary-color)':'var(--text2)')+'">date range</button></div>';
+    var dateField=st.mode==='single'
+      ?'<div>'+lbl('date')+'<input type="date" id="tts-date-confirm" class="inp" value="'+st.date+'" onchange="setTtsField(\'date\',this.value)"></div>'
+      :'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div>'+lbl('start date')+'<input type="date" class="inp" value="'+st.startDate+'" onchange="setTtsField(\'startDate\',this.value)"></div><div>'+lbl('end date')+'<input type="date" class="inp" value="'+st.endDate+'" onchange="setTtsField(\'endDate\',this.value)"></div></div>';
+    var perDayHint='';
+    if(st.mode==='range'&&st.startDate&&st.endDate){
+      var ds=[];var cur=new Date(st.startDate);var endD=new Date(st.endDate);
+      while(cur<=endD){ds.push(cur.toISOString().slice(0,10));cur.setDate(cur.getDate()+1);}
+      perDayHint='<div class="muted" style="font-size:11px">these totals will be split evenly across '+ds.length+' day'+(ds.length>1?'s':'')+' · days that already have data are skipped</div>';
+    }
+    inner.innerHTML=hdr('confirm — '+charLabel)+
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'+typeBadge+'</div>'+
+      modeToggle+
+      '<div style="display:flex;flex-direction:column;gap:11px">'+
+      dateField+
+      perDayHint+
+      '<div>'+lbl('GMV ($)')+'<input type="number" step="any" id="tts-gmv" class="inp" value="'+(ex.gmv==null?'':ex.gmv)+'" placeholder="—"></div>'+
+      '<div>'+lbl('items sold')+'<input type="number" id="tts-items" class="inp" value="'+(ex.itemsSold==null?'':ex.itemsSold)+'" placeholder="—"></div>'+
+      '<div>'+lbl('commission ($)')+'<input type="number" step="any" id="tts-comm" class="inp" value="'+(ex.commission==null?'':ex.commission)+'" placeholder="—"></div>'+
+      '<div style="display:flex;gap:8px;margin-top:6px"><button onclick="saveTtsToLedger()" class="btn-primary" style="flex:1;padding:10px;font-size:13px;border-radius:8px">save to ledger</button><button onclick="setTtsField(\'step\',\'pick\')" class="btn-ghost" style="padding:10px 14px;font-size:13px;border-radius:8px">back</button></div>'+
+      '<details style="margin-top:6px"><summary class="muted" style="font-size:11px;cursor:pointer;outline:none">show raw OCR text</summary><pre style="background:var(--inp-bg);border:0.5px solid var(--border);border-radius:6px;padding:8px;font-size:10px;color:var(--text2);max-height:120px;overflow:auto;white-space:pre-wrap;margin-top:6px;font-family:monospace">'+(ex.rawText||'').replace(/</g,'&lt;')+'</pre></details>'+
+      '</div>';
+  }
+}
+
 function renderOverview(){
   var s=allStats();var chars=activeChars();
   var charRows=chars.map(function(c){
@@ -578,8 +900,9 @@ function renderDailyLedger(charId){
   }
   var todayRow=row(today,todayEntry,true);
   var pastRows=expanded?pastEntries.map(function(e){return row(e.date,e,false);}).join(''):'';
+  var uploadBtn='<button onclick="openTtsModal(\''+charId+'\')" class="btn-ghost" style="padding:5px 10px;font-size:11px;border-radius:6px">upload tts screenshot</button>';
   var toggleBtn=pastEntries.length?'<button onclick="toggleLedgerExpand()" class="btn-ghost" style="padding:5px 10px;font-size:11px;border-radius:6px">'+(expanded?'hide history':'show '+pastEntries.length+' past day'+(pastEntries.length>1?'s':''))+'</button>':'';
-  return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:10px;flex-wrap:wrap"><div><div class="sl">daily ledger — '+c.name+'</div><div class="muted" style="font-size:10px;margin-top:2px">credits + revenue from your tts dashboard · ⚠ flags ledger/video mismatch · USD</div></div>'+toggleBtn+'</div>'+todayRow+pastRows+'</div>';
+  return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:10px;flex-wrap:wrap"><div><div class="sl">daily ledger — '+c.name+'</div><div class="muted" style="font-size:10px;margin-top:2px">credits + revenue from your tts dashboard · ⚠ flags ledger/video mismatch · USD</div></div><div style="display:flex;gap:6px;flex-wrap:wrap">'+uploadBtn+toggleBtn+'</div></div>'+todayRow+pastRows+'</div>';
 }
 
 // === Generic library system: motions + angles ===
@@ -829,6 +1152,93 @@ function renderProducts(){
   return viewAsRow+catRow+tagRow+'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><div class="muted" style="font-size:10px">double-click any card to edit · click ☆ to favorite</div><button class="btn-primary" onclick="openModal(\'product\')" style="padding:7px 14px;font-size:12px;border-radius:20px">+ add product</button></div>'+(uc&&f!=='uncategorized'?uncatBanner():'')+rows;
 }
 
+// === Earnings tab ===
+function setEarnRange(r){S.earnRange=r;render();}
+function setEarnMetric(m){S.earnMetric=m;render();}
+function earnRangeDates(range){
+  var t=new Date();var dates=[];
+  if(range==='thisMonth'){
+    var first=new Date(t.getFullYear(),t.getMonth(),1);
+    var cur=new Date(first);
+    while(cur<=t){dates.push(cur.toISOString().slice(0,10));cur.setDate(cur.getDate()+1);}
+  } else if(range==='lastMonth'){
+    var lmStart=new Date(t.getFullYear(),t.getMonth()-1,1);
+    var lmEnd=new Date(t.getFullYear(),t.getMonth(),0);
+    var c=new Date(lmStart);
+    while(c<=lmEnd){dates.push(c.toISOString().slice(0,10));c.setDate(c.getDate()+1);}
+  } else if(range==='last30'){
+    for(var i=29;i>=0;i--){var d=new Date(t.getFullYear(),t.getMonth(),t.getDate()-i);dates.push(d.toISOString().slice(0,10));}
+  } else { // allTime
+    // Pull from existing data
+    var all=[];
+    S.dailyLedger.forEach(function(e){all.push(e.date);});
+    S.videos.forEach(function(v){if(v.date)all.push(v.date);});
+    if(!all.length)return [t.toISOString().slice(0,10)];
+    all.sort();
+    var start=new Date(all[0]);var end=new Date(all[all.length-1]);
+    var c2=new Date(start);
+    while(c2<=end){dates.push(c2.toISOString().slice(0,10));c2.setDate(c2.getDate()+1);}
+  }
+  return dates;
+}
+function earnSeriesForChar(charId,dates,metric){
+  return dates.map(function(d){
+    if(metric==='gmv'){var e=getDailyEntry(charId,d);return e&&Number(e.gmv)?Number(e.gmv):0;}
+    if(metric==='commission'){var e2=getDailyEntry(charId,d);return e2&&Number(e2.commission)?Number(e2.commission):0;}
+    if(metric==='videos'){return S.videos.filter(function(v){return v.character===charId&&v.date===d&&v.posted===true;}).length;}
+    return 0;
+  });
+}
+function earnTotalForChar(charId,dates,metric){return earnSeriesForChar(charId,dates,metric).reduce(function(a,b){return a+b;},0);}
+
+function renderEarningsChart(chars,dates,metric){
+  if(!chars.length||!dates.length)return '';
+  var series=chars.map(function(c){return {label:c.name,color:c.color,data:earnSeriesForChar(c.id,dates,metric)};});
+  var allVals=[].concat.apply([],series.map(function(s){return s.data;}));
+  var maxVal=Math.max.apply(null,allVals);
+  if(maxVal<=0)return '<div class="muted" style="text-align:center;padding:40px;font-size:13px">no '+metric+' data in this range</div>';
+  var yMax=Math.ceil(maxVal*1.15);if(yMax<5)yMax=5;
+  var W=720,H=220,padL=46,padR=12,padT=16,padB=24;
+  function xC(i){return dates.length===1?(padL+(W-padL-padR)/2):padL+(i/(dates.length-1))*(W-padL-padR);}
+  function yC(v){return H-padB-(v/yMax)*(H-padT-padB);}
+  var paths=series.map(function(s){if(!s.data.some(function(v){return v>0;}))return '';var d=s.data.map(function(v,i){return (i===0?'M':'L')+xC(i).toFixed(1)+','+yC(v).toFixed(1);}).join(' ');return '<path d="'+d+'" fill="none" stroke="'+s.color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" opacity="0.95"/>';}).join('');
+  var prefix=metric==='videos'?'':'$';
+  var yTicks=[0,Math.round(yMax/2),yMax];
+  var yLabels=yTicks.map(function(v){return '<g><line x1="'+padL+'" y1="'+yC(v).toFixed(1)+'" x2="'+(W-padR)+'" y2="'+yC(v).toFixed(1)+'" stroke="var(--row-div)" stroke-width="0.5" stroke-dasharray="2,3"/><text x="'+(padL-6)+'" y="'+(yC(v)+3.5)+'" fill="var(--text2)" font-size="9.5" text-anchor="end" font-family="system-ui">'+prefix+v+'</text></g>';}).join('');
+  var xLabels='';var step=Math.max(1,Math.floor(dates.length/6));for(var i=0;i<dates.length;i+=step){xLabels+='<text x="'+xC(i).toFixed(1)+'" y="'+(H-padB+13)+'" fill="var(--text2)" font-size="9.5" text-anchor="middle" font-family="system-ui">'+dates[i].slice(5)+'</text>';}
+  var dots=series.map(function(s){var li=s.data.length-1;var lv=s.data[li];if(!lv)return '';return '<circle cx="'+xC(li).toFixed(1)+'" cy="'+yC(lv).toFixed(1)+'" r="3.5" fill="'+s.color+'"/>';}).join('');
+  return '<svg viewBox="0 0 '+W+' '+H+'" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;max-height:260px">'+yLabels+xLabels+paths+dots+'</svg>';
+}
+
+function renderEarnings(){
+  var chars=activeChars();
+  if(!chars.length)return '<div class="muted" style="text-align:center;padding:40px">no active characters</div>';
+  var range=S.earnRange||'thisMonth';
+  var metric=S.earnMetric||'commission';
+  var dates=earnRangeDates(range);
+  var rangeLabel={thisMonth:'this month',lastMonth:'last month',last30:'last 30 days',allTime:'all time'}[range]||range;
+  var rangePill=function(v,lbl){var a=range===v;return '<button onclick="setEarnRange(\''+v+'\')" style="padding:5px 12px;border-radius:20px;font-size:12px;cursor:pointer;font-family:inherit;background:'+(a?'var(--btn-primary-bg)':'transparent')+';color:'+(a?'var(--btn-primary-color)':'var(--text2)')+';border:0.5px solid '+(a?'transparent':'var(--border)')+'">'+lbl+'</button>';};
+  var rangeRow='<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><span class="muted" style="font-size:11px;margin-right:4px">range:</span>'+rangePill('thisMonth','this month')+rangePill('lastMonth','last month')+rangePill('last30','last 30 days')+rangePill('allTime','all time')+'</div>';
+  var metricPill=function(v,lbl){var a=metric===v;var col=v==='gmv'?'#1D9E75':v==='commission'?'#7F77DD':'#D85A30';return '<button onclick="setEarnMetric(\''+v+'\')" style="padding:5px 12px;border-radius:20px;font-size:12px;cursor:pointer;font-family:inherit;background:'+(a?col+'22':'transparent')+';color:'+(a?col:'var(--text2)')+';border:0.5px solid '+(a?col+'66':'var(--border)')+'">'+lbl+'</button>';};
+  var metricRow='<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:14px"><span class="muted" style="font-size:11px;margin-right:4px">metric:</span>'+metricPill('gmv','GMV')+metricPill('commission','commission')+metricPill('videos','videos posted')+'</div>';
+  var legend=chars.map(function(c){var t=earnTotalForChar(c.id,dates,metric);var disp=metric==='videos'?String(t):fmtUSD(t);return '<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--text);margin-right:14px">'+dot(c.color,7)+c.name+' <span class="muted" style="margin-left:3px">('+disp+')</span></span>';}).join('');
+  var chartCard='<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px"><div><div class="sl">'+(metric==='videos'?'videos posted':metric)+' — '+rangeLabel+'</div><div class="muted" style="font-size:10px;margin-top:2px">per character over '+dates.length+' day'+(dates.length>1?'s':'')+'</div></div><div style="display:flex;flex-wrap:wrap;gap:0">'+legend+'</div></div>'+renderEarningsChart(chars,dates,metric)+'</div>';
+
+  // Per-character cards with all 3 metrics for the selected range
+  var cards=chars.map(function(c){
+    var gmv=earnTotalForChar(c.id,dates,'gmv');
+    var comm=earnTotalForChar(c.id,dates,'commission');
+    var vids=earnTotalForChar(c.id,dates,'videos');
+    var cs=charStats(c.id);// for ROI we use lifetime total credits since per-range credit usage isn't tracked separately
+    var rangeCreditTotal=S.videos.filter(function(v){return v.character===c.id&&dates.indexOf(v.date)>-1;}).reduce(function(a,v){return a+tc(v);},0);
+    var roiVal=roi(comm,rangeCreditTotal);
+    var stat=function(lbl,val,sub){return '<div style="flex:1;min-width:0"><div class="sl" style="margin-bottom:2px">'+lbl+'</div><div style="font-size:18px;font-weight:500;color:var(--text);letter-spacing:-0.3px">'+val+'</div>'+(sub?'<div class="muted" style="font-size:11px;margin-top:1px">'+sub+'</div>':'')+'</div>';};
+    return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:10px;border-left:3px solid '+c.color+'"><div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'+dot(c.color,9)+'<span style="font-size:14px;font-weight:500;color:var(--text)">'+c.name+'</span></div><div style="display:flex;gap:14px;flex-wrap:wrap">'+stat('GMV',fmtUSD(gmv),vids?'over '+vids+' posted vid'+(vids>1?'s':''):null)+stat('commission',fmtUSD(comm),null)+stat('videos posted',String(vids),null)+stat('ROI',fmtROI(roiVal),roiVal!=null?(roiVal>=1?'profitable':'underwater'):null)+'</div></div>';
+  }).join('');
+
+  return rangeRow+metricRow+chartCard+'<div class="sl" style="margin-bottom:8px">per character — '+rangeLabel+'</div>'+cards;
+}
+
 function renderImport(){
   return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:20px 22px;margin-bottom:14px"><div style="font-size:14px;font-weight:500;margin-bottom:5px;color:var(--text)">import daily data</div><div class="muted" style="font-size:12px;margin-bottom:14px;line-height:1.6">paste json from your end-of-day extraction prompt. character names are matched case-insensitively (Zoe, ZOE, zoe all work). videos merge, backgrounds auto-create, products auto-import as uncategorized. duplicates skipped. entire import undoable with cmd+z.</div><textarea id="import-ta" class="inp" placeholder="paste json here..." style="height:190px;resize:vertical;line-height:1.6;font-family:monospace;font-size:12px"></textarea><div style="display:flex;gap:8px;margin-top:10px"><button class="btn-primary" onclick="doImport()" style="padding:9px 22px;font-size:13px;border-radius:8px">import</button><button class="btn-ghost" onclick="clearImport()" style="padding:9px 14px;font-size:13px;border-radius:8px">clear</button></div><div id="import-msg" style="font-size:12px;margin-top:10px;line-height:1.6"></div></div><div class="card" style="border:0.5px solid;border-radius:12px;padding:20px 22px"><div style="font-size:14px;font-weight:500;margin-bottom:4px;color:var(--text)">export all data</div><div class="muted" style="font-size:12px;margin-bottom:12px">copies your full dashboard data to clipboard. paste into notes or a text file to save as backup.</div><div style="display:flex;gap:10px;align-items:center"><button class="btn-ghost" onclick="doExport()" style="padding:8px 16px;font-size:13px;border-radius:8px">copy to clipboard</button><span id="export-ok" style="font-size:12px;color:#1D9E75;opacity:0;transition:opacity 0.3s">copied!</span></div></div>';
 }
@@ -861,10 +1271,10 @@ function renderHistory(){
 
 function render(){
   var el=document.getElementById('content');if(!el)return;
-  var views={overview:renderOverview,characters:renderCharacters,products:renderProducts,motions:renderMotions,angles:renderAngles,generate:renderGenerator,import:renderImport,tools:renderTools,settings:renderSettings,history:renderHistory};
+  var views={overview:renderOverview,characters:renderCharacters,products:renderProducts,motions:renderMotions,angles:renderAngles,generate:renderGenerator,earnings:renderEarnings,import:renderImport,tools:renderTools,settings:renderSettings,history:renderHistory};
   el.innerHTML=(views[S.view]||renderOverview)();
   setupDZs();applyTheme();
-  document.querySelectorAll('.nav-btn').forEach(function(btn){var map={'overview':'overview','characters':'characters','products':'products','motions':'motions','angles':'angles','generate':'generate','import data':'import','tools':'tools','settings':'settings','history':'history'};btn.classList.toggle('active',map[btn.textContent.trim()]===S.view);});
+  document.querySelectorAll('.nav-btn').forEach(function(btn){var map={'overview':'overview','characters':'characters','products':'products','motions':'motions','angles':'angles','generate':'generate','earnings':'earnings','import data':'import','tools':'tools','settings':'settings','history':'history'};btn.classList.toggle('active',map[btn.textContent.trim()]===S.view);});
 }
 
 function setupDZs(){
