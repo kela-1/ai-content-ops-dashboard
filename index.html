@@ -582,13 +582,58 @@ function detectScreenshotType(text){
   return 'unknown';
 }
 
-// Parse a TTS Shop daily-aggregate screenshot
+// Parse a TTS Shop daily-aggregate screenshot.
+// TikTok renders 2x2 grids of (label, value) pairs. Tesseract often serializes them row-major,
+// which interleaves columns: [labelA labelB valueA valueB %A %B labelC labelD valueC valueD ...]
+// The parser has to handle both that and the column-major layout.
 function parseDailyScreenshot(text){
   var t=text.replace(/[\r\n]+/g,' ').replace(/\s+/g,' ');
-  var gmvMatch=t.match(/(?:attr\.?|commission)?\s*gmv[^$]{0,40}\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM])?/i);
-  var itemsMatch=t.match(/items?\s+sold[^\d]{0,40}([\d,]+)\b/i);
-  // Require "est." prefix so we don't false-match the "Commissions" tab label near a GMV value.
-  var commMatch=t.match(/est(?:\.|imated)?\s+commissions?[^$]{0,40}\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM])?/i);
+
+  // GMV — first $ amount after the GMV label.
+  var gmvMatch=t.match(/(?:attr\.?|commission)?\s*gmv[^$]{0,60}\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM])?/i);
+  var gmv=gmvMatch?parseAmount(gmvMatch[1],gmvMatch[2]):null;
+
+  // Items sold — bare integer with no $ prefix. Strip $X amounts before searching so the regex
+  // doesn't grab digits from an interleaved $ value (e.g. "$2.8K" giving us "2").
+  var itemsSold=null;
+  var itemsPos=t.search(/items?\s+sold/i);
+  if(itemsPos>-1){
+    var afterItems=t.substring(itemsPos);
+    var stripped=afterItems.replace(/\$\s*[\d,]+(?:\.\d+)?\s*[kKmM]?/g,' ');
+    var im=stripped.match(/items?\s+sold[\s\S]{0,80}?(?:^|[^\d.])([\d,]+)(?!\.\d)/i);
+    if(im){var v=parseInt(im[1].replace(/,/g,''));if(!isNaN(v))itemsSold=v;}
+  }
+
+  // Commission — handle row-major (label-row then value-row) AND column-major layouts.
+  // Also skip the disclaimer banner ("Estimated commissions data by products...") at the top:
+  // require a $ sign within 100 chars of any candidate label match.
+  var commission=null;
+  var estPos=-1;
+  var estRe=/est(?:\.|imated)?\s+commissions?\b/gi;
+  var em;
+  while((em=estRe.exec(t))!==null){
+    if(/\$/.test(t.substring(em.index,em.index+100))){estPos=em.index;break;}
+  }
+  var basePos=t.search(/commission\s+base/i);
+  if(basePos>-1&&estPos>-1&&estPos>basePos){
+    var between=t.substring(basePos,estPos);
+    if(!/\$/.test(between)){
+      // Row-major: labels grouped first, then values. First $ after Est. is "Commission base"
+      // value; SECOND $ is the actual Est. commissions value.
+      var afterEst=t.substring(estPos);
+      var dollarRe=/\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM])?/g;
+      var dollars=[];var dm;
+      while((dm=dollarRe.exec(afterEst))!==null)dollars.push(dm);
+      if(dollars.length>=2)commission=parseAmount(dollars[1][1],dollars[1][2]);
+    }
+  }
+  if(commission==null&&estPos>-1){
+    // Column-major (or no Commission base nearby) — first $ after Est. commissions is correct.
+    var tail=t.substring(estPos);
+    var cm=tail.match(/^[^$]{0,80}\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM])?/);
+    if(cm)commission=parseAmount(cm[1],cm[2]);
+  }
+
   // Date detection
   var dateInfo={mode:null,date:null,startDate:null,endDate:null};
   var rangeMatch=t.match(/([a-z]+\s+\d+,?\s+\d{4})\s*[-–—]\s*([a-z]+\s+\d+,?\s+\d{4})/i);
@@ -600,7 +645,7 @@ function parseDailyScreenshot(text){
     var singleMatch=t.match(/([a-z]+\s+\d+,?\s+\d{4})\s*(?:\(GMT|$|\s)/i);
     if(singleMatch){var d=new Date(singleMatch[1]);if(!isNaN(d.getTime())){dateInfo.mode='single';dateInfo.date=d.toISOString().slice(0,10);}}
   }
-  return {gmv:gmvMatch?parseAmount(gmvMatch[1],gmvMatch[2]):null,itemsSold:itemsMatch?(parseInt(itemsMatch[1].replace(/,/g,''))||null):null,commission:commMatch?parseAmount(commMatch[1],commMatch[2]):null,dateInfo:dateInfo,rawText:text};
+  return {gmv:gmv,itemsSold:itemsSold,commission:commission,dateInfo:dateInfo,rawText:text};
 }
 
 // Parse a TikTok Studio per-video analysis screenshot
