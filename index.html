@@ -647,9 +647,13 @@ function parseDailyScreenshot(text){
 
   // Items sold — bare integer with no $ prefix. Strip away both $X amounts AND "N days" phrases
   // (from "Last 7 days" toggle and "...past 7 days" banner text) so we don't grab "7" by mistake.
+  // SAFETY: if no $ amounts appear anywhere in the OCR, Tesseract clearly failed to read the
+  // values row (large display fonts on TTS Shop Home are hard for OCR). In that case, refuse to
+  // extract a bogus items count from stray digits like "7" in "7 You gained...".
   var itemsSold=null;
+  var ocrHasDollar=/\$\s*[\d,]+(?:\.\d+)?\s*[kKmM]?/.test(t);
   var itemsPos=t.search(/items?\s+sold/i);
-  if(itemsPos>-1){
+  if(itemsPos>-1&&ocrHasDollar){
     var afterItems=t.substring(itemsPos);
     var stripped=afterItems
       .replace(/\$\s*[\d,]+(?:\.\d+)?\s*[kKmM]?/g,' ')
@@ -976,12 +980,18 @@ function renderTtsModal(){
     if(st.mode==='range'&&st.startDate&&st.endDate){
       var ds=[];var cur=new Date(st.startDate);var endD=new Date(st.endDate);
       while(cur<=endD){ds.push(cur.toISOString().slice(0,10));cur.setDate(cur.getDate()+1);}
-      perDayHint='<div class="muted" style="font-size:11px">these totals will be split evenly across '+ds.length+' day'+(ds.length>1?'s':'')+' · days that already have data are skipped</div>';
+      perDayHint='<div class="muted" style="font-size:11px">saved as one '+ds.length+'-day range entry · charts distribute it evenly</div>';
+    }
+    // OCR failure notice — when nothing was extracted, give a clear hint
+    var ocrFailNotice='';
+    if(ex.gmv==null&&ex.itemsSold==null&&ex.commission==null){
+      ocrFailNotice='<div style="background:#BA751722;border:0.5px solid #BA751755;border-radius:8px;padding:10px 12px;font-size:12px;color:#BA7517;line-height:1.5">⚠ <strong>OCR couldn\'t read the values</strong> from this screenshot — likely the large display fonts on the TikTok Shop home page. The Data view (under Analytics → Data → Commissions tab) usually OCRs better. For now, type the values in manually below.</div>';
     }
     inner.innerHTML=hdr('confirm — '+charLabel)+
       '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'+typeBadge+'</div>'+
       modeToggle+
       '<div style="display:flex;flex-direction:column;gap:11px">'+
+      ocrFailNotice+
       dateField+
       perDayHint+
       '<div>'+lbl('GMV ($)')+'<input type="number" step="any" id="tts-gmv" class="inp" value="'+(ex.gmv==null?'':ex.gmv)+'" placeholder="—"></div>'+
