@@ -982,10 +982,16 @@ function renderTtsModal(){
       while(cur<=endD){ds.push(cur.toISOString().slice(0,10));cur.setDate(cur.getDate()+1);}
       perDayHint='<div class="muted" style="font-size:11px">saved as one '+ds.length+'-day range entry · charts distribute it evenly</div>';
     }
-    // OCR failure notice — when nothing was extracted, give a clear hint
+    // OCR failure notice — when nothing was extracted, give a clear hint and recommend the right format.
     var ocrFailNotice='';
     if(ex.gmv==null&&ex.itemsSold==null&&ex.commission==null){
-      ocrFailNotice='<div style="background:#BA751722;border:0.5px solid #BA751755;border-radius:8px;padding:10px 12px;font-size:12px;color:#BA7517;line-height:1.5">⚠ <strong>OCR couldn\'t read the values</strong> from this screenshot — likely the large display fonts on the TikTok Shop home page. The Data view (under Analytics → Data → Commissions tab) usually OCRs better. For now, type the values in manually below.</div>';
+      var rawT=(ex.rawText||'').toLowerCase();
+      var isShopHome=/attr\.?\s+gmv|est\.?\s+commission/.test(rawT)&&!/commission\s+(?:gmv|base)/.test(rawT);
+      var headline=isShopHome?'this screenshot won\'t work reliably':'OCR couldn\'t read the values';
+      var steps=isShopHome
+        ?'<div style="margin-top:8px"><strong>Use this instead:</strong><div style="margin-top:4px">In the TikTok Shop app → tap your profile → <strong>Analytics</strong> → <strong>Data</strong> → switch to the <strong>Commissions</strong> tab → screenshot that. The numbers there are smaller and OCR-readable.</div></div><div style="margin-top:8px"><a onclick="setTtsField(\'step\',\'pick\');setTtsField(\'imageDataUrl\',null);" style="color:#BA7517;cursor:pointer;text-decoration:underline">← upload a different screenshot</a></div>'
+        :'<div style="margin-top:6px">The fields below are blank — type values manually if you have them, or <a onclick="setTtsField(\'step\',\'pick\');setTtsField(\'imageDataUrl\',null);" style="color:#BA7517;cursor:pointer;text-decoration:underline">go back and try a different screenshot</a>.</div>';
+      ocrFailNotice='<div style="background:#BA751722;border:0.5px solid #BA751755;border-radius:8px;padding:12px 14px;font-size:12px;color:#BA7517;line-height:1.55">⚠ <strong>'+headline+'</strong>'+(isShopHome?' — the TikTok Shop home page uses large display fonts that Tesseract OCR can\'t reliably read.':'')+steps+'</div>';
     }
     inner.innerHTML=hdr('confirm — '+charLabel)+
       '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'+typeBadge+'</div>'+
