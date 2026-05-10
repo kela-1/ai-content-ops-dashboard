@@ -1325,10 +1325,13 @@ async function generateVideo(){
       throw new Error('submit failed ('+submitRes.status+'): '+errText.slice(0,240));
     }
     var sd=await submitRes.json();
-    if(!sd.id){throw new Error('no job id returned. response: '+JSON.stringify(sd).slice(0,240));}
-    activeGenState.id=sd.id;
+    // Higgsfield returns the job id as 'request_id' (verified from SDK source).
+    // Falling back to 'id' for backward compat with the old proxy/api shape.
+    var jobId=sd.request_id||sd.id;
+    if(!jobId){throw new Error('no job id returned. response: '+JSON.stringify(sd).slice(0,240));}
+    activeGenState.id=jobId;
     activeGenState.status='queued';
-    activeGenState.statusText='queued · id '+String(sd.id).slice(0,18);
+    activeGenState.statusText='queued · id '+String(jobId).slice(0,18);
     render();
     await pollGen(secret);
   }catch(err){
