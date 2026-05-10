@@ -104,6 +104,7 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1}
 /* Spinner for the generate-video status panel */
 @keyframes spin{to{transform:rotate(360deg)}}
 </style>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
@@ -122,6 +123,7 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1}
     <button class="nav-btn" onclick="setView('motions')">motions</button>
     <button class="nav-btn" onclick="setView('angles')">angles</button>
     <button class="nav-btn" onclick="setView('generate')">generate</button>
+    <button class="nav-btn" onclick="setView('inbox')">inbox</button>
     <button class="nav-btn" onclick="setView('earnings')">earnings</button>
     <button class="nav-btn" onclick="setView('import')">import data</button>
     <button class="nav-btn" onclick="setView('tools')">tools</button>
@@ -153,6 +155,14 @@ var GEN_DEFAULTS={task:'text-to-video',model:'kling-3.0',duration:5,aspect_ratio
 function getProxySecret(){var s=localStorage.getItem('aicops_proxy_secret');if(!s){s=prompt('Enter the proxy secret (one-time setup):');if(!s)return null;s=s.trim();localStorage.setItem('aicops_proxy_secret',s);}return s;}
 function clearProxySecret(){localStorage.removeItem('aicops_proxy_secret');showToast('proxy secret cleared — next generate will re-prompt','muted');}
 
+// === Gmail / Google OAuth config ===
+// Paste your Google OAuth Client ID from console.cloud.google.com (Credentials).
+// Format: "123456789-abc...xyz.apps.googleusercontent.com". This is PUBLIC — safe
+// to commit. The Client Secret stays in .env, NOT here.
+var GOOGLE_CLIENT_ID='PASTE_YOUR_GOOGLE_CLIENT_ID_HERE.apps.googleusercontent.com';
+var GMAIL_SCOPES='https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email';
+var gmailTokenClient=null;
+
 var STORE_KEY='aicops_data';
 var HIST_KEY='aicops_history';
 var S={
@@ -165,6 +175,7 @@ var S={
     {id:'jessica',name:'Jessica',color:'#D85A30',archived:false,description:'',favorites:{products:[],backgrounds:[],motions:[],angles:[]}}
   ],
   videos:[],products:[],backgrounds:[],motions:[],angles:[],modelImages:[],dailyLedger:[],ledgerExpanded:false,
+  gmailEmail:null,emails:[],activeEmailId:null,composingReply:null,emailListLoading:false,
   gen:{character:null,modelImage:null,background:null,motion:null,angle:null,products:[],customPrompt:''},blueprints:[],savingBlueprint:null,
   earnRange:'thisMonth',earnMetric:'commission',
   bgTags:['City','Night','Bedroom','Gym','Bathroom','Mirror'],
@@ -176,7 +187,7 @@ var S={
 };
 var HISTORY=[],UNDO_STACK=[],REDO_STACK=[];
 
-function save(){try{var d=JSON.parse(JSON.stringify(S));delete d.view;delete d.editingVideo;delete d.editingProduct;delete d.editingBg;delete d.editingMotion;delete d.editingAngle;delete d.editingModelImage;delete d.ptf;delete d.statusFilter;delete d.pfav;delete d.bgFav;delete d.mtf;delete d.atf;delete d.mfav;delete d.afav;delete d.savingBlueprint;delete d.ttsModal;localStorage.setItem(STORE_KEY,JSON.stringify(d));}catch(e){console.error('localStorage save failed (probably over 5MB cap):',e.message);if(typeof showToast==='function')showToast('save failed: storage full — try removing old images','red');}}
+function save(){try{var d=JSON.parse(JSON.stringify(S));delete d.view;delete d.editingVideo;delete d.editingProduct;delete d.editingBg;delete d.editingMotion;delete d.editingAngle;delete d.editingModelImage;delete d.ptf;delete d.statusFilter;delete d.pfav;delete d.bgFav;delete d.mtf;delete d.atf;delete d.mfav;delete d.afav;delete d.savingBlueprint;delete d.ttsModal;delete d.emailListLoading;localStorage.setItem(STORE_KEY,JSON.stringify(d));}catch(e){console.error('localStorage save failed (probably over 5MB cap):',e.message);if(typeof showToast==='function')showToast('save failed: storage full — try removing old images','red');}}
 function saveHistory(){try{localStorage.setItem(HIST_KEY,JSON.stringify(HISTORY.slice(0,1000)));}catch(e){}}
 function load(){
   try{
@@ -199,6 +210,12 @@ function load(){
       if(typeof S.gen.customPrompt!=='string')S.gen.customPrompt='';
       if(!Array.isArray(S.modelImages))S.modelImages=[];
       if(!Array.isArray(S.modelImageTags))S.modelImageTags=['portrait','full-body','casual','studio','pose'];
+      if(!Array.isArray(S.emails))S.emails=[];
+      if(typeof S.gmailEmail==='undefined')S.gmailEmail=null;
+      if(typeof S.activeEmailId==='undefined')S.activeEmailId=null;
+      if(typeof S.composingReply==='undefined')S.composingReply=null;
+      // Per-character mailing address for free-sample auto-replies
+      S.characters.forEach(function(c){if(typeof c.mailingAddress!=='string')c.mailingAddress='';});
       S.modelImages.forEach(function(mi){if(!Array.isArray(mi.tags))mi.tags=[];});
       S.products.forEach(function(p){if(!p.tags)p.tags=[];});
       S.backgrounds.forEach(function(b){if(!b.tags)b.tags=[];});
@@ -1698,9 +1715,317 @@ function renderHistory(){
   return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px"><div style="font-size:14px;font-weight:500;color:var(--text)">action history <span class="muted" style="font-size:12px;font-weight:400">('+HISTORY.length+')</span></div>'+(HISTORY.length?'<button class="btn-ghost" onclick="copyHistory()" style="padding:7px 14px;font-size:12px;border-radius:8px">copy to clipboard</button>':'')+'</div><div class="card" style="border:0.5px solid;border-radius:12px;padding:16px 20px">'+rows+'</div>';
 }
 
+// === Gmail Inbox ============================================================
+// Token lives in sessionStorage so it dies with the tab; we never persist
+// OAuth tokens to localStorage.
+
+function gmailGetToken(){return sessionStorage.getItem('aicops_gmail_token')||null;}
+function gmailSetToken(t){if(t)sessionStorage.setItem('aicops_gmail_token',t);else sessionStorage.removeItem('aicops_gmail_token');}
+
+function gmailEnsureTokenClient(){
+  if(gmailTokenClient)return gmailTokenClient;
+  if(!window.google||!google.accounts||!google.accounts.oauth2){
+    showToast('Google Identity script not loaded yet — refresh and try again','red');
+    return null;
+  }
+  if(GOOGLE_CLIENT_ID.indexOf('PASTE_YOUR_GOOGLE_CLIENT_ID_HERE')>-1){
+    showToast('Google Client ID not set in dashboard.html — paste your OAuth client ID','red');
+    return null;
+  }
+  gmailTokenClient=google.accounts.oauth2.initTokenClient({
+    client_id:GOOGLE_CLIENT_ID,
+    scope:GMAIL_SCOPES,
+    callback:function(resp){
+      if(resp.error){showToast('Gmail auth failed: '+resp.error,'red');return;}
+      gmailSetToken(resp.access_token);
+      gmailFetchUserEmail().then(function(){loadEmails();}).catch(function(e){console.error(e);});
+    },
+  });
+  return gmailTokenClient;
+}
+
+function gmailConnect(){
+  var c=gmailEnsureTokenClient();if(!c)return;
+  c.requestAccessToken({prompt:S.gmailEmail?'':'consent'});
+}
+
+function gmailDisconnect(){
+  var t=gmailGetToken();
+  if(t&&window.google&&google.accounts&&google.accounts.oauth2){
+    try{google.accounts.oauth2.revoke(t,function(){});}catch(e){}
+  }
+  gmailSetToken(null);
+  S.gmailEmail=null;S.emails=[];S.activeEmailId=null;S.composingReply=null;
+  save();render();
+  showToast('disconnected from Gmail','muted');
+}
+
+async function gmailApi(path,opts){
+  opts=opts||{};
+  var token=gmailGetToken();
+  if(!token)throw new Error('not connected to Gmail');
+  var r=await fetch('https://gmail.googleapis.com/gmail/v1/'+path,Object.assign({},opts,{
+    headers:Object.assign({'Authorization':'Bearer '+token},opts.headers||{}),
+  }));
+  if(r.status===401){
+    gmailSetToken(null);
+    throw new Error('Gmail token expired — click connect again');
+  }
+  if(!r.ok){
+    var t=await r.text();
+    throw new Error('Gmail '+r.status+': '+t.slice(0,200));
+  }
+  return r.json();
+}
+
+async function gmailFetchUserEmail(){
+  var r=await fetch('https://www.googleapis.com/oauth2/v3/userinfo',{headers:{'Authorization':'Bearer '+gmailGetToken()}});
+  if(r.ok){var d=await r.json();S.gmailEmail=d.email||null;save();render();}
+}
+
+// Recursively walk message payload to find a text/plain or text/html body
+function gmailExtractBody(payload){
+  if(!payload)return '';
+  function decode(b){if(!b)return '';try{return atob(b.replace(/-/g,'+').replace(/_/g,'/'));}catch(e){return '';}}
+  if(payload.body&&payload.body.data&&(!payload.parts||!payload.parts.length)){
+    return decode(payload.body.data);
+  }
+  if(payload.parts&&payload.parts.length){
+    // Prefer text/plain over text/html
+    for(var i=0;i<payload.parts.length;i++){
+      var p=payload.parts[i];
+      if(p.mimeType==='text/plain'&&p.body&&p.body.data)return decode(p.body.data);
+    }
+    for(var j=0;j<payload.parts.length;j++){
+      var p2=payload.parts[j];
+      if(p2.mimeType==='text/html'&&p2.body&&p2.body.data){
+        return decode(p2.body.data).replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+      }
+    }
+    // Recurse into multipart
+    for(var k=0;k<payload.parts.length;k++){
+      var nested=gmailExtractBody(payload.parts[k]);
+      if(nested)return nested;
+    }
+  }
+  return '';
+}
+
+function gmailHeader(msg,name){
+  var h=msg.payload&&msg.payload.headers;
+  if(!h)return '';
+  for(var i=0;i<h.length;i++){if(h[i].name.toLowerCase()===name.toLowerCase())return h[i].value;}
+  return '';
+}
+
+async function loadEmails(){
+  if(!gmailGetToken()){showToast('connect Gmail first','muted');return;}
+  S.emailListLoading=true;render();
+  try{
+    var list=await gmailApi('users/me/messages?maxResults=20&q=in:inbox -in:chats');
+    var ids=(list.messages||[]).map(function(m){return m.id;});
+    var existing={};(S.emails||[]).forEach(function(e){existing[e.id]=e;});
+    var fetched=[];
+    for(var i=0;i<ids.length;i++){
+      var id=ids[i];
+      if(existing[id]){fetched.push(existing[id]);continue;} // already cached
+      var msg=await gmailApi('users/me/messages/'+id+'?format=full');
+      fetched.push({
+        id:id,
+        threadId:msg.threadId,
+        subject:gmailHeader(msg,'Subject'),
+        from:gmailHeader(msg,'From'),
+        date:gmailHeader(msg,'Date'),
+        snippet:msg.snippet||'',
+        body:gmailExtractBody(msg.payload).slice(0,12000),
+        category:null,summary:null,suggestedReplies:null,
+      });
+    }
+    S.emails=fetched;S.emailListLoading=false;
+    save();render();
+    showToast('loaded '+fetched.length+' email'+(fetched.length===1?'':'s'),'green');
+  }catch(err){
+    S.emailListLoading=false;render();
+    showToast('load failed: '+err.message,'red');
+  }
+}
+
+async function categorizeEmail(emailId){
+  var em=S.emails.find(function(x){return x.id===emailId;});if(!em)return;
+  var secret=getProxySecret();if(!secret)return;
+  // Use selected character's mailing address. If none selected, use Lena (first active).
+  var c=S.selChar?gc(S.selChar):activeChars()[0];
+  em.categorizing=true;render();
+  try{
+    var r=await fetch(PROXY_BASE+'/categorize',{
+      method:'POST',
+      headers:{'Authorization':'Bearer '+secret,'Content-Type':'application/json'},
+      body:JSON.stringify({
+        subject:em.subject,from:em.from,body:em.body,
+        mailing_address:c?c.mailingAddress||'':'',
+        character_name:c?c.name:'',
+      }),
+    });
+    if(!r.ok){var t=await r.text();throw new Error(r.status+': '+t.slice(0,240));}
+    var d=await r.json();
+    em.category=d.category;em.summary=d.summary;em.suggestedReplies=d.suggested_replies||[];
+    em.categorizing=false;
+    save();render();
+  }catch(err){
+    em.categorizing=false;
+    em.categorizeError=err.message;
+    render();
+    showToast('categorize failed: '+err.message,'red');
+  }
+}
+
+// Build an RFC822 message and base64url-encode for Gmail API send
+function buildRfc822(toAddr,fromAddr,subject,inReplyTo,bodyText){
+  var headers=[
+    'From: '+fromAddr,
+    'To: '+toAddr,
+    'Subject: '+subject,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=utf-8',
+  ];
+  if(inReplyTo){headers.push('In-Reply-To: '+inReplyTo);headers.push('References: '+inReplyTo);}
+  var msg=headers.join('\r\n')+'\r\n\r\n'+bodyText;
+  // base64url encode (UTF-8 safe)
+  var utf8=unescape(encodeURIComponent(msg));
+  return btoa(utf8).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+
+async function sendReply(emailId,replyBody){
+  var em=S.emails.find(function(x){return x.id===emailId;});if(!em){showToast('email not found','red');return;}
+  if(!gmailGetToken()){showToast('connect Gmail first','muted');return;}
+  if(!replyBody||!replyBody.trim()){showToast('reply body is empty','muted');return;}
+  // Pull required headers from the original email
+  var toAddr=em.from; // reply goes back to the sender
+  var subj=em.subject||'';
+  var subject=subj.toLowerCase().indexOf('re:')===0?subj:'Re: '+subj;
+  // Try to fetch Message-ID for proper threading; fallback to no In-Reply-To
+  var inReplyTo='';
+  try{var msg=await gmailApi('users/me/messages/'+emailId+'?format=metadata&metadataHeaders=Message-ID');inReplyTo=gmailHeader(msg,'Message-ID')||'';}catch(e){}
+  var raw=buildRfc822(toAddr,S.gmailEmail||'me',subject,inReplyTo,replyBody);
+  try{
+    em.sending=true;render();
+    await gmailApi('users/me/messages/send',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({raw:raw,threadId:em.threadId}),
+    });
+    em.sending=false;
+    em.sentAt=new Date().toISOString();
+    em.sentBody=replyBody;
+    S.composingReply=null;
+    save();render();
+    showToast('reply sent','green');
+  }catch(err){
+    em.sending=false;render();
+    showToast('send failed: '+err.message,'red');
+  }
+}
+
+function startReply(emailId,replyIdx){
+  var em=S.emails.find(function(x){return x.id===emailId;});if(!em||!em.suggestedReplies)return;
+  var r=em.suggestedReplies[replyIdx];if(!r)return;
+  S.composingReply={emailId:emailId,replyIdx:replyIdx,body:r.body,label:r.label};
+  save();render();
+}
+function updateComposingBody(val){if(S.composingReply){S.composingReply.body=val;}}
+function cancelReply(){S.composingReply=null;save();render();}
+function setActiveEmail(id){S.activeEmailId=id;S.composingReply=null;save();render();}
+function setMailingAddress(charId,val){var c=gc(charId);if(!c)return;c.mailingAddress=val;save();}
+
+function renderInbox(){
+  var hasClientId=GOOGLE_CLIENT_ID.indexOf('PASTE_YOUR_GOOGLE_CLIENT_ID_HERE')===-1;
+  if(!hasClientId){
+    return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:24px"><div class="sl" style="margin-bottom:6px">setup required</div><div style="font-size:13px;color:var(--text);line-height:1.6">paste your Google OAuth Client ID into the <code>GOOGLE_CLIENT_ID</code> constant near the top of <code>dashboard.html</code> (search for <code>PASTE_YOUR_GOOGLE_CLIENT_ID_HERE</code>). then deploy and refresh.</div></div>';
+  }
+  var connected=!!S.gmailEmail&&!!gmailGetToken();
+  if(!connected){
+    return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:24px;text-align:center"><div style="font-size:15px;font-weight:500;margin-bottom:8px;color:var(--text)">connect a gmail inbox</div><div class="muted" style="font-size:12px;margin-bottom:18px;line-height:1.6">read incoming emails, auto-categorize as trash / free sample / brand deal, and draft replies in the character\'s voice. nothing sends without your approval.</div><button class="btn-primary" onclick="gmailConnect()" style="padding:10px 20px;font-size:13px;border-radius:8px">connect gmail</button></div>';
+  }
+
+  // Header row: connected email + actions
+  var header='<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><div style="flex:1;min-width:0"><div class="sl" style="margin-bottom:2px">connected</div><div style="font-size:13px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+S.gmailEmail+'</div></div><button onclick="loadEmails()" class="btn-ghost" style="padding:7px 14px;font-size:12px;border-radius:8px">'+(S.emailListLoading?'loading…':'refresh')+'</button><button onclick="gmailDisconnect()" class="btn-ghost" style="padding:7px 14px;font-size:12px;border-radius:8px">disconnect</button></div>';
+
+  // Mailing address per character — small managed block
+  var act=activeChars();
+  var addrBlocks=act.map(function(c){
+    var hasAddr=(c.mailingAddress||'').trim().length>0;
+    return '<div style="border:0.5px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:6px;background:var(--card-bg)"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'+dot(c.color,8)+'<div style="font-size:12px;font-weight:500;color:var(--text)">'+c.name+' — mailing address</div>'+(hasAddr?'<span style="font-size:10px;color:#1D9E75;margin-left:auto">✓ set</span>':'<span style="font-size:10px;color:var(--text2);margin-left:auto">not set</span>')+'</div><textarea id="ma-'+c.id+'" class="inp" rows="2" placeholder="Name, Street, City, State ZIP" style="resize:vertical;line-height:1.4;font-family:monospace;font-size:11.5px" onchange="setMailingAddress(\''+c.id+'\',this.value)">'+(c.mailingAddress||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</textarea></div>';
+  }).join('');
+  var addrCard='<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px"><div class="sl" style="margin-bottom:8px">mailing addresses</div><div class="muted" style="font-size:10px;margin-bottom:10px">used in free-sample auto-replies. one per character.</div>'+addrBlocks+'</div>';
+
+  // Email list
+  var emails=S.emails||[];
+  if(!emails.length){
+    var empty='<div class="card" style="border:0.5px solid;border-radius:12px;padding:24px;text-align:center"><div class="muted" style="font-size:13px">'+(S.emailListLoading?'loading inbox…':'no emails loaded yet — click refresh')+'</div></div>';
+    return header+addrCard+empty;
+  }
+
+  var listItems=emails.map(function(em){
+    var isActive=S.activeEmailId===em.id;
+    var catPill='';
+    if(em.category==='trash')catPill='<span style="font-size:10px;padding:2px 8px;border-radius:20px;background:#e24b4a22;color:#e24b4a;border:0.5px solid #e24b4a44">trash</span>';
+    else if(em.category==='free_sample')catPill='<span style="font-size:10px;padding:2px 8px;border-radius:20px;background:#1D9E7522;color:#1D9E75;border:0.5px solid #1D9E7544">free sample</span>';
+    else if(em.category==='brand_deal')catPill='<span style="font-size:10px;padding:2px 8px;border-radius:20px;background:#7F77DD22;color:#7F77DD;border:0.5px solid #7F77DD44">brand deal</span>';
+    else if(em.categorizing)catPill='<span style="font-size:10px;padding:2px 8px;border-radius:20px;background:var(--tag-bg);color:var(--text2);border:0.5px solid var(--tag-border)">categorizing…</span>';
+    var border=isActive?'1.5px solid #7F77DD':'0.5px solid var(--border)';
+    var bg=isActive?'#7F77DD0e':'var(--card-bg)';
+    var sentMark=em.sentAt?'<span style="font-size:10px;color:#1D9E75;margin-left:6px">↩ replied</span>':'';
+    return '<div onclick="setActiveEmail(\''+em.id+'\')" style="border:'+border+';background:'+bg+';border-radius:10px;padding:10px 12px;margin-bottom:6px;cursor:pointer"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px"><div style="font-size:12.5px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">'+(em.subject||'(no subject)').replace(/</g,'&lt;')+sentMark+'</div>'+catPill+'</div><div class="muted" style="font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(em.from||'').replace(/</g,'&lt;')+'</div></div>';
+  }).join('');
+  var listCard='<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 16px;margin-bottom:14px"><div class="sl" style="margin-bottom:10px">recent ('+emails.length+')</div>'+listItems+'</div>';
+
+  // Detail view
+  var detail='';
+  if(S.activeEmailId){
+    var em=emails.find(function(x){return x.id===S.activeEmailId;});
+    if(em){
+      var headBlock='<div style="border-bottom:0.5px solid var(--row-div);padding-bottom:10px;margin-bottom:12px"><div style="font-size:14px;font-weight:500;color:var(--text);margin-bottom:4px">'+(em.subject||'(no subject)').replace(/</g,'&lt;')+'</div><div class="muted" style="font-size:11px">'+(em.from||'').replace(/</g,'&lt;')+'</div>'+(em.date?'<div class="muted" style="font-size:10.5px;margin-top:2px">'+em.date.replace(/</g,'&lt;')+'</div>':'')+'</div>';
+      var bodyBlock='<div style="background:var(--inp-bg);border:0.5px solid var(--border);border-radius:8px;padding:12px;font-size:12px;line-height:1.55;max-height:240px;overflow:auto;white-space:pre-wrap;color:var(--text);margin-bottom:12px">'+(em.body||em.snippet||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';
+
+      var actionBlock;
+      if(em.categorizing){
+        actionBlock='<div class="muted" style="font-size:12px;padding:10px 0">categorizing with claude…</div>';
+      }else if(!em.category){
+        actionBlock='<button onclick="categorizeEmail(\''+em.id+'\')" class="btn-primary" style="padding:8px 16px;font-size:12px;border-radius:8px">categorize + draft replies</button>'+(em.categorizeError?'<div style="font-size:11px;color:#e24b4a;margin-top:6px">'+em.categorizeError.replace(/</g,'&lt;')+'</div>':'');
+      }else{
+        // Show summary + replies
+        var summBlock='<div style="margin-bottom:14px"><div class="sl" style="margin-bottom:4px">summary</div><div style="font-size:13px;color:var(--text);line-height:1.5">'+(em.summary||'').replace(/</g,'&lt;')+'</div></div>';
+        var replyButtons='';
+        if(em.suggestedReplies&&em.suggestedReplies.length){
+          replyButtons=em.suggestedReplies.map(function(r,i){
+            var clr=r.label==='Accept'?'#1D9E75':r.label==='Decline'?'#e24b4a':r.label==='Negotiate'?'#BA7517':'#7F77DD';
+            return '<button onclick="startReply(\''+em.id+'\','+i+')" style="padding:7px 14px;font-size:12px;border-radius:8px;border:0.5px solid '+clr+'66;color:'+clr+';background:'+clr+'14;cursor:pointer;font-family:inherit;margin-right:6px;margin-bottom:6px">'+r.label+'</button>';
+          }).join('');
+        }else if(em.category==='trash'){
+          replyButtons='<div class="muted" style="font-size:11px;padding:8px 0">no reply needed (trash)</div>';
+        }
+        actionBlock=summBlock+(replyButtons?'<div style="margin-bottom:8px"><div class="sl" style="margin-bottom:6px">suggested replies</div>'+replyButtons+'</div>':'');
+
+        // Compose box if we're drafting
+        if(S.composingReply&&S.composingReply.emailId===em.id){
+          var draft=(S.composingReply.body||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+          actionBlock+='<div style="border:0.5px solid #7F77DD55;border-radius:10px;padding:12px;background:#7F77DD08;margin-top:10px"><div class="sl" style="margin-bottom:6px;color:#7F77DD">drafting · '+S.composingReply.label+'</div><textarea id="reply-textarea" class="inp" rows="6" style="resize:vertical;line-height:1.55;font-family:inherit;font-size:13px;margin-bottom:8px" oninput="updateComposingBody(this.value)">'+draft+'</textarea><div style="display:flex;gap:6px;flex-wrap:wrap"><button onclick="sendReply(\''+em.id+'\',document.getElementById(\'reply-textarea\').value)" class="btn-primary" style="padding:7px 16px;font-size:12px;border-radius:8px"'+(em.sending?' disabled':'')+'>'+(em.sending?'sending…':'send')+'</button><button onclick="cancelReply()" class="btn-ghost" style="padding:7px 12px;font-size:12px;border-radius:8px">cancel</button></div></div>';
+        }
+        if(em.sentAt){
+          actionBlock+='<div style="font-size:11px;color:#1D9E75;margin-top:10px">↩ replied at '+em.sentAt+'</div>';
+        }
+      }
+
+      detail='<div class="card" style="border:0.5px solid;border-radius:12px;padding:16px 20px;margin-bottom:14px">'+headBlock+bodyBlock+actionBlock+'</div>';
+    }
+  }
+
+  return header+addrCard+(detail?detail:'')+listCard;
+}
+
 function render(){
   var el=document.getElementById('content');if(!el)return;
-  var views={overview:renderOverview,characters:renderCharacters,products:renderProducts,motions:renderMotions,angles:renderAngles,generate:renderGenerator,earnings:renderEarnings,import:renderImport,tools:renderTools,settings:renderSettings,history:renderHistory};
+  var views={overview:renderOverview,characters:renderCharacters,products:renderProducts,motions:renderMotions,angles:renderAngles,generate:renderGenerator,inbox:renderInbox,earnings:renderEarnings,import:renderImport,tools:renderTools,settings:renderSettings,history:renderHistory};
   el.innerHTML=(views[S.view]||renderOverview)();
   setupDZs();applyTheme();
   document.querySelectorAll('.nav-btn').forEach(function(btn){var map={'overview':'overview','characters':'characters','products':'products','motions':'motions','angles':'angles','generate':'generate','earnings':'earnings','import data':'import','tools':'tools','settings':'settings','history':'history'};btn.classList.toggle('active',map[btn.textContent.trim()]===S.view);});
@@ -1808,7 +2133,7 @@ function submitVideo(){var char=document.getElementById('m-char')?.value,title=d
 function submitProduct(){var name=document.getElementById('p-name')?.value?.trim(),link=document.getElementById('p-link')?.value?.trim(),cat=document.getElementById('p-cat')?.value||'uncategorized';if(!name||!link){alert('Fill in name and link');return;}if(S.products.find(function(p){return p.link===link;})){alert('Link already exists');return;}var p={id:Date.now(),name:name,link:link,category:cat,tags:[],imageData:S.pendingProdImg||null,dateAdded:new Date().toISOString().split('T')[0]};S.products.push(p);var pid=p.id;pushUndo(function(){S.products=S.products.filter(function(x){return x.id!==pid;});},function(){S.products.push(p);},'added product: '+name);logH('add','added product: '+name);save();closeModal();render();}
 function submitBackground(){var char=document.getElementById('bg-char')?.value,name=document.getElementById('bg-name')?.value?.trim();var tags=Array.from(document.querySelectorAll('.bg-tag:checked')).map(function(cb){return cb.value;});if(!name){alert('Enter a background name');return;}var ex=fuzzy(name,S.backgrounds.filter(function(b){return b.character===char;}));if(ex&&!confirm('"'+ex.name+'" looks similar. Add anyway?'))return;var b={id:Date.now(),character:char,name:name,tags:tags,imageData:S.pendingBgImg||null,dateAdded:new Date().toISOString().split('T')[0]};S.backgrounds.push(b);var bid=b.id;pushUndo(function(){S.backgrounds=S.backgrounds.filter(function(x){return x.id!==bid;});},function(){S.backgrounds.push(b);},'added background: '+name);logH('add','added background: '+name);save();closeModal();render();}
 function submitModelImage(){var char=document.getElementById('mi-char')?.value,name=document.getElementById('mi-name')?.value?.trim();var tags=Array.from(document.querySelectorAll('.mi-tag:checked')).map(function(cb){return cb.value;});if(!name){alert('Enter a model image name');return;}if(!char){alert('Pick a character');return;}var mi={id:Date.now(),character:char,name:name,tags:tags,imageData:S.pendingMiImg||null,dateAdded:new Date().toISOString().split('T')[0]};S.modelImages.push(mi);var mid=mi.id;pushUndo(function(){S.modelImages=S.modelImages.filter(function(x){return x.id!==mid;});},function(){S.modelImages.push(mi);},'added model image: '+name);logH('add','added model image: '+name);save();closeModal();render();}
-function submitCharacter(){var name=document.getElementById('char-name')?.value?.trim(),color=document.getElementById('char-color')?.value||'#7F77DD';if(!name){alert('Enter a name');return;}var id=name.toLowerCase().replace(/\s+/g,'_');if(S.characters.find(function(c){return c.id===id;})){alert('Already exists');return;}var c={id:id,name:name,color:color,archived:false,description:'',favorites:{products:[],backgrounds:[],motions:[],angles:[]}};S.characters.push(c);pushUndo(function(){S.characters=S.characters.filter(function(x){return x.id!==id;});},function(){S.characters.push(c);},'added character: '+name);logH('add','added character: '+name);save();closeModal();render();}
+function submitCharacter(){var name=document.getElementById('char-name')?.value?.trim(),color=document.getElementById('char-color')?.value||'#7F77DD';if(!name){alert('Enter a name');return;}var id=name.toLowerCase().replace(/\s+/g,'_');if(S.characters.find(function(c){return c.id===id;})){alert('Already exists');return;}var c={id:id,name:name,color:color,archived:false,description:'',mailingAddress:'',favorites:{products:[],backgrounds:[],motions:[],angles:[]}};S.characters.push(c);pushUndo(function(){S.characters=S.characters.filter(function(x){return x.id!==id;});},function(){S.characters.push(c);},'added character: '+name);logH('add','added character: '+name);save();closeModal();render();}
 
 function doImport(){
   var raw=document.getElementById('import-ta')?.value?.trim();var msg=document.getElementById('import-msg');
