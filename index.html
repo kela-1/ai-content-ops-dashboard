@@ -175,7 +175,7 @@ var S={
     {id:'jessica',name:'Jessica',color:'#D85A30',archived:false,description:'',favorites:{products:[],backgrounds:[],motions:[],angles:[]}}
   ],
   videos:[],products:[],backgrounds:[],motions:[],angles:[],modelImages:[],dailyLedger:[],ledgerExpanded:false,
-  gmailEmail:null,emails:[],activeEmailId:null,composingReply:null,emailListLoading:false,
+  gmailAccounts:[],activeAccountFilter:'all',emails:[],activeEmailId:null,composingReply:null,emailListLoading:false,
   gen:{character:null,modelImage:null,background:null,motion:null,angle:null,products:[],customPrompt:''},blueprints:[],savingBlueprint:null,
   earnRange:'thisMonth',earnMetric:'commission',
   bgTags:['City','Night','Bedroom','Gym','Bathroom','Mirror'],
@@ -211,7 +211,16 @@ function load(){
       if(!Array.isArray(S.modelImages))S.modelImages=[];
       if(!Array.isArray(S.modelImageTags))S.modelImageTags=['portrait','full-body','casual','studio','pose'];
       if(!Array.isArray(S.emails))S.emails=[];
-      if(typeof S.gmailEmail==='undefined')S.gmailEmail=null;
+      // Migrate from single-account (S.gmailEmail) to multi-account (S.gmailAccounts[])
+      if(typeof S.gmailEmail==='string'&&S.gmailEmail&&(!Array.isArray(S.gmailAccounts)||!S.gmailAccounts.length)){
+        S.gmailAccounts=[{email:S.gmailEmail,nextPageToken:null}];
+      }
+      if(!Array.isArray(S.gmailAccounts))S.gmailAccounts=[];
+      if(typeof S.activeAccountFilter!=='string')S.activeAccountFilter='all';
+      // Tag any pre-multi-account cached emails with the first account
+      var _firstAcc=S.gmailAccounts[0]?S.gmailAccounts[0].email:null;
+      S.emails.forEach(function(e){if(!e.accountEmail&&_firstAcc)e.accountEmail=_firstAcc;});
+      delete S.gmailEmail; // legacy field, no longer used
       if(typeof S.activeEmailId==='undefined')S.activeEmailId=null;
       if(typeof S.composingReply==='undefined')S.composingReply=null;
       // Per-character mailing address for free-sample auto-replies
@@ -1715,12 +1724,15 @@ function renderHistory(){
   return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px"><div style="font-size:14px;font-weight:500;color:var(--text)">action history <span class="muted" style="font-size:12px;font-weight:400">('+HISTORY.length+')</span></div>'+(HISTORY.length?'<button class="btn-ghost" onclick="copyHistory()" style="padding:7px 14px;font-size:12px;border-radius:8px">copy to clipboard</button>':'')+'</div><div class="card" style="border:0.5px solid;border-radius:12px;padding:16px 20px">'+rows+'</div>';
 }
 
-// === Gmail Inbox ============================================================
-// Token lives in sessionStorage so it dies with the tab; we never persist
-// OAuth tokens to localStorage.
+// === Gmail Inbox (multi-account) ============================================
+// Tokens live in sessionStorage keyed by email so they die with the tab; we
+// never persist OAuth tokens to localStorage. Each connected account gets its
+// own token under aicops_gmail_token::<email>.
 
-function gmailGetToken(){return sessionStorage.getItem('aicops_gmail_token')||null;}
-function gmailSetToken(t){if(t)sessionStorage.setItem('aicops_gmail_token',t);else sessionStorage.removeItem('aicops_gmail_token');}
+function gmailTokenKey(email){return 'aicops_gmail_token::'+(email||'').toLowerCase();}
+function gmailGetToken(email){if(!email)return null;return sessionStorage.getItem(gmailTokenKey(email))||null;}
+function gmailSetToken(email,token){if(!email)return;if(token)sessionStorage.setItem(gmailTokenKey(email),token);else sessionStorage.removeItem(gmailTokenKey(email));}
+function gmailHasAnyToken(){for(var i=0;i<S.gmailAccounts.length;i++){if(gmailGetToken(S.gmailAccounts[i].email))return true;}return false;}
 
 function gmailEnsureTokenClient(){
   if(gmailTokenClient)return gmailTokenClient;
@@ -1732,55 +1744,75 @@ function gmailEnsureTokenClient(){
     showToast('Google Client ID not set in dashboard.html — paste your OAuth client ID','red');
     return null;
   }
+  // Initial callback is a placeholder — gmailConnect() overrides it per call so
+  // the captured account-email scope is correct for that flow.
   gmailTokenClient=google.accounts.oauth2.initTokenClient({
     client_id:GOOGLE_CLIENT_ID,
     scope:GMAIL_SCOPES,
-    callback:function(resp){
-      if(resp.error){showToast('Gmail auth failed: '+resp.error,'red');return;}
-      gmailSetToken(resp.access_token);
-      gmailFetchUserEmail().then(function(){loadEmails();}).catch(function(e){console.error(e);});
-    },
+    callback:function(){/* overridden in gmailConnect */},
   });
   return gmailTokenClient;
 }
 
 function gmailConnect(){
   var c=gmailEnsureTokenClient();if(!c)return;
-  c.requestAccessToken({prompt:S.gmailEmail?'':'consent'});
+  c.callback=async function(resp){
+    if(resp.error){showToast('Gmail auth failed: '+resp.error,'red');return;}
+    var token=resp.access_token;
+    try{
+      var r=await fetch('https://www.googleapis.com/oauth2/v3/userinfo',{headers:{'Authorization':'Bearer '+token}});
+      if(!r.ok)throw new Error('userinfo failed: '+r.status);
+      var d=await r.json();
+      var email=d.email;
+      if(!email)throw new Error('no email returned from userinfo');
+      gmailSetToken(email,token);
+      // Add to accounts if new
+      if(!S.gmailAccounts.find(function(a){return a.email===email;})){
+        S.gmailAccounts.push({email:email,nextPageToken:null});
+      }
+      save();render();
+      showToast('connected '+email,'green');
+      loadEmails(email); // initial fetch for the just-connected account
+    }catch(e){
+      console.error('[gmailConnect]',e);
+      showToast('connect failed: '+e.message,'red');
+    }
+  };
+  // 'select_account' lets the user pick a different Google account each time
+  c.requestAccessToken({prompt:'select_account'});
 }
 
-function gmailDisconnect(){
-  var t=gmailGetToken();
+function gmailDisconnect(email){
+  var t=gmailGetToken(email);
   if(t&&window.google&&google.accounts&&google.accounts.oauth2){
     try{google.accounts.oauth2.revoke(t,function(){});}catch(e){}
   }
-  gmailSetToken(null);
-  S.gmailEmail=null;S.emails=[];S.activeEmailId=null;S.composingReply=null;
+  gmailSetToken(email,null);
+  S.gmailAccounts=S.gmailAccounts.filter(function(a){return a.email!==email;});
+  S.emails=S.emails.filter(function(e){return e.accountEmail!==email;});
+  if(S.activeAccountFilter===email)S.activeAccountFilter='all';
+  if(S.activeEmailId){var still=S.emails.find(function(e){return e.id===S.activeEmailId;});if(!still)S.activeEmailId=null;}
   save();render();
-  showToast('disconnected from Gmail','muted');
+  showToast('disconnected '+email,'muted');
 }
 
-async function gmailApi(path,opts){
+async function gmailApi(path,opts,accountEmail){
   opts=opts||{};
-  var token=gmailGetToken();
-  if(!token)throw new Error('not connected to Gmail');
+  if(!accountEmail)throw new Error('gmailApi: missing accountEmail');
+  var token=gmailGetToken(accountEmail);
+  if(!token)throw new Error('not connected to '+accountEmail+' (token expired? reconnect)');
   var r=await fetch('https://gmail.googleapis.com/gmail/v1/'+path,Object.assign({},opts,{
     headers:Object.assign({'Authorization':'Bearer '+token},opts.headers||{}),
   }));
   if(r.status===401){
-    gmailSetToken(null);
-    throw new Error('Gmail token expired — click connect again');
+    gmailSetToken(accountEmail,null);
+    throw new Error('Gmail token for '+accountEmail+' expired — click connect again');
   }
   if(!r.ok){
     var t=await r.text();
     throw new Error('Gmail '+r.status+': '+t.slice(0,200));
   }
   return r.json();
-}
-
-async function gmailFetchUserEmail(){
-  var r=await fetch('https://www.googleapis.com/oauth2/v3/userinfo',{headers:{'Authorization':'Bearer '+gmailGetToken()}});
-  if(r.ok){var d=await r.json();S.gmailEmail=d.email||null;save();render();}
 }
 
 // Recursively walk message payload to find a text/plain or text/html body
@@ -1818,21 +1850,76 @@ function gmailHeader(msg,name){
   return '';
 }
 
-async function loadEmails(){
-  if(!gmailGetToken()){showToast('connect Gmail first','muted');return;}
+// Load the most recent 50 emails for one account (or all connected accounts).
+// Cached emails are preserved so categorization state isn't lost on refresh.
+async function loadEmails(accountEmail){
+  var accounts;
+  if(accountEmail){
+    var one=S.gmailAccounts.find(function(a){return a.email===accountEmail;});
+    if(!one){showToast('account not connected: '+accountEmail,'red');return;}
+    accounts=[one];
+  }else{
+    accounts=S.gmailAccounts.slice();
+  }
+  if(!accounts.length){showToast('connect at least one Gmail account','muted');return;}
   S.emailListLoading=true;render();
   try{
-    var list=await gmailApi('users/me/messages?maxResults=20&q=in:inbox -in:chats');
-    var ids=(list.messages||[]).map(function(m){return m.id;});
     var existing={};(S.emails||[]).forEach(function(e){existing[e.id]=e;});
-    var fetched=[];
-    for(var i=0;i<ids.length;i++){
-      var id=ids[i];
-      if(existing[id]){fetched.push(existing[id]);continue;} // already cached
-      var msg=await gmailApi('users/me/messages/'+id+'?format=full');
-      fetched.push({
-        id:id,
-        threadId:msg.threadId,
+    var totalAdded=0;
+    // Replace emails for the loaded accounts; keep emails for other accounts intact.
+    var loadedAccountSet={};accounts.forEach(function(a){loadedAccountSet[a.email]=true;});
+    var preserved=(S.emails||[]).filter(function(e){return !loadedAccountSet[e.accountEmail];});
+    var freshlyLoaded=[];
+    for(var ai=0;ai<accounts.length;ai++){
+      var acc=accounts[ai];
+      var list=await gmailApi('users/me/messages?maxResults=50&q=in%3Ainbox%20-in%3Achats',{},acc.email);
+      acc.nextPageToken=list.nextPageToken||null;
+      var ids=(list.messages||[]).map(function(m){return m.id;});
+      for(var i=0;i<ids.length;i++){
+        var id=ids[i];
+        if(existing[id]){freshlyLoaded.push(existing[id]);continue;} // preserve cached state
+        var msg=await gmailApi('users/me/messages/'+id+'?format=full',{},acc.email);
+        freshlyLoaded.push({
+          id:id,threadId:msg.threadId,
+          accountEmail:acc.email,
+          subject:gmailHeader(msg,'Subject'),
+          from:gmailHeader(msg,'From'),
+          date:gmailHeader(msg,'Date'),
+          snippet:msg.snippet||'',
+          body:gmailExtractBody(msg.payload).slice(0,12000),
+          category:null,summary:null,suggestedReplies:null,
+        });
+        totalAdded++;
+      }
+    }
+    S.emails=preserved.concat(freshlyLoaded);
+    S.emailListLoading=false;
+    save();render();
+    showToast('loaded '+freshlyLoaded.length+' email'+(freshlyLoaded.length===1?'':'s')+(totalAdded?' ('+totalAdded+' new)':''),'green');
+  }catch(err){
+    S.emailListLoading=false;render();
+    showToast('load failed: '+err.message,'red');
+  }
+}
+
+// Fetch the NEXT 50 emails for one account using the stored pageToken.
+async function loadMoreEmails(accountEmail){
+  var acc=S.gmailAccounts.find(function(a){return a.email===accountEmail;});
+  if(!acc){showToast('account not connected: '+accountEmail,'red');return;}
+  if(!acc.nextPageToken){showToast('no more emails to load for '+accountEmail,'muted');return;}
+  S.emailListLoading=true;render();
+  try{
+    var list=await gmailApi('users/me/messages?maxResults=50&pageToken='+encodeURIComponent(acc.nextPageToken)+'&q=in%3Ainbox%20-in%3Achats',{},acc.email);
+    acc.nextPageToken=list.nextPageToken||null;
+    var existing={};(S.emails||[]).forEach(function(e){existing[e.id]=e;});
+    var added=0;
+    for(var i=0;i<(list.messages||[]).length;i++){
+      var id=list.messages[i].id;
+      if(existing[id])continue;
+      var msg=await gmailApi('users/me/messages/'+id+'?format=full',{},acc.email);
+      S.emails.push({
+        id:id,threadId:msg.threadId,
+        accountEmail:acc.email,
         subject:gmailHeader(msg,'Subject'),
         from:gmailHeader(msg,'From'),
         date:gmailHeader(msg,'Date'),
@@ -1840,13 +1927,14 @@ async function loadEmails(){
         body:gmailExtractBody(msg.payload).slice(0,12000),
         category:null,summary:null,suggestedReplies:null,
       });
+      added++;
     }
-    S.emails=fetched;S.emailListLoading=false;
+    S.emailListLoading=false;
     save();render();
-    showToast('loaded '+fetched.length+' email'+(fetched.length===1?'':'s'),'green');
+    showToast('loaded '+added+' more email'+(added===1?'':'s'),'green');
   }catch(err){
     S.emailListLoading=false;render();
-    showToast('load failed: '+err.message,'red');
+    showToast('load more failed: '+err.message,'red');
   }
 }
 
@@ -1897,34 +1985,35 @@ function buildRfc822(toAddr,fromAddr,subject,inReplyTo,bodyText){
 
 async function sendReply(emailId,replyBody){
   var em=S.emails.find(function(x){return x.id===emailId;});if(!em){showToast('email not found','red');return;}
-  if(!gmailGetToken()){showToast('connect Gmail first','muted');return;}
+  var acc=em.accountEmail;
+  if(!acc||!gmailGetToken(acc)){showToast('reconnect '+(acc||'gmail account')+' to send','muted');return;}
   if(!replyBody||!replyBody.trim()){showToast('reply body is empty','muted');return;}
-  // Pull required headers from the original email
-  var toAddr=em.from; // reply goes back to the sender
+  var toAddr=em.from;
   var subj=em.subject||'';
   var subject=subj.toLowerCase().indexOf('re:')===0?subj:'Re: '+subj;
-  // Try to fetch Message-ID for proper threading; fallback to no In-Reply-To
   var inReplyTo='';
-  try{var msg=await gmailApi('users/me/messages/'+emailId+'?format=metadata&metadataHeaders=Message-ID');inReplyTo=gmailHeader(msg,'Message-ID')||'';}catch(e){}
-  var raw=buildRfc822(toAddr,S.gmailEmail||'me',subject,inReplyTo,replyBody);
+  try{var msg=await gmailApi('users/me/messages/'+emailId+'?format=metadata&metadataHeaders=Message-ID',{},acc);inReplyTo=gmailHeader(msg,'Message-ID')||'';}catch(e){}
+  var raw=buildRfc822(toAddr,acc||'me',subject,inReplyTo,replyBody);
   try{
     em.sending=true;render();
     await gmailApi('users/me/messages/send',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({raw:raw,threadId:em.threadId}),
-    });
+    },acc);
     em.sending=false;
     em.sentAt=new Date().toISOString();
     em.sentBody=replyBody;
     S.composingReply=null;
     save();render();
-    showToast('reply sent','green');
+    showToast('reply sent from '+acc,'green');
   }catch(err){
     em.sending=false;render();
     showToast('send failed: '+err.message,'red');
   }
 }
+
+function setActiveAccountFilter(email){S.activeAccountFilter=email||'all';S.activeEmailId=null;S.composingReply=null;save();render();}
 
 function startReply(emailId,replyIdx){
   var em=S.emails.find(function(x){return x.id===emailId;});if(!em||!em.suggestedReplies)return;
@@ -1942,13 +2031,20 @@ function renderInbox(){
   if(!hasClientId){
     return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:24px"><div class="sl" style="margin-bottom:6px">setup required</div><div style="font-size:13px;color:var(--text);line-height:1.6">paste your Google OAuth Client ID into the <code>GOOGLE_CLIENT_ID</code> constant near the top of <code>dashboard.html</code> (search for <code>PASTE_YOUR_GOOGLE_CLIENT_ID_HERE</code>). then deploy and refresh.</div></div>';
   }
-  var connected=!!S.gmailEmail&&!!gmailGetToken();
-  if(!connected){
-    return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:24px;text-align:center"><div style="font-size:15px;font-weight:500;margin-bottom:8px;color:var(--text)">connect a gmail inbox</div><div class="muted" style="font-size:12px;margin-bottom:18px;line-height:1.6">read incoming emails, auto-categorize as trash / free sample / brand deal, and draft replies in the character\'s voice. nothing sends without your approval.</div><button class="btn-primary" onclick="gmailConnect()" style="padding:10px 20px;font-size:13px;border-radius:8px">connect gmail</button></div>';
+  if(!S.gmailAccounts.length){
+    return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:24px;text-align:center"><div style="font-size:15px;font-weight:500;margin-bottom:8px;color:var(--text)">connect a gmail inbox</div><div class="muted" style="font-size:12px;margin-bottom:18px;line-height:1.6">read incoming emails, auto-categorize as trash / free sample / brand deal, and draft replies in the character\'s voice. nothing sends without your approval. you can connect multiple accounts.</div><button class="btn-primary" onclick="gmailConnect()" style="padding:10px 20px;font-size:13px;border-radius:8px">connect gmail</button></div>';
   }
 
-  // Header row: connected email + actions
-  var header='<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><div style="flex:1;min-width:0"><div class="sl" style="margin-bottom:2px">connected</div><div style="font-size:13px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+S.gmailEmail+'</div></div><button onclick="loadEmails()" class="btn-ghost" style="padding:7px 14px;font-size:12px;border-radius:8px">'+(S.emailListLoading?'loading…':'refresh')+'</button><button onclick="gmailDisconnect()" class="btn-ghost" style="padding:7px 14px;font-size:12px;border-radius:8px">disconnect</button></div>';
+  // Connected accounts row + filter
+  var accountChips=S.gmailAccounts.map(function(a){
+    var hasTok=!!gmailGetToken(a.email);
+    var status=hasTok?'<span style="color:#1D9E75;font-size:9px;margin-right:4px">●</span>':'<span style="color:#BA7517;font-size:9px;margin-right:4px" title="token expired — click to reconnect">●</span>';
+    return '<div style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:0.5px solid var(--border);border-radius:20px;background:var(--card-bg);font-size:11.5px;color:var(--text);margin-right:6px;margin-bottom:6px">'+status+a.email+'<button onclick="loadEmails(\''+a.email+'\')" class="btn-ghost" style="padding:2px 8px;font-size:10px;border-radius:12px;margin-left:4px" title="refresh this account">⟳</button><button onclick="gmailDisconnect(\''+a.email+'\')" class="del-x" title="disconnect">×</button></div>';
+  }).join('');
+  var allActive=(S.activeAccountFilter==='all'||!S.activeAccountFilter);
+  var filterBtns='<button onclick="setActiveAccountFilter(\'all\')" style="padding:5px 12px;border-radius:20px;font-size:11.5px;cursor:pointer;font-family:inherit;background:'+(allActive?'var(--btn-primary-bg)':'transparent')+';color:'+(allActive?'var(--btn-primary-color)':'var(--text2)')+';border:0.5px solid '+(allActive?'transparent':'var(--border)')+';margin-right:6px">all ('+S.gmailAccounts.length+')</button>'+S.gmailAccounts.map(function(a){var act=S.activeAccountFilter===a.email;return '<button onclick="setActiveAccountFilter(\''+a.email+'\')" style="padding:5px 12px;border-radius:20px;font-size:11.5px;cursor:pointer;font-family:inherit;background:'+(act?'var(--btn-primary-bg)':'transparent')+';color:'+(act?'var(--btn-primary-color)':'var(--text2)')+';border:0.5px solid '+(act?'transparent':'var(--border)')+';margin-right:6px">'+a.email.split('@')[0]+'</button>';}).join('');
+
+  var header='<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px"><div class="sl" style="margin-bottom:8px">connected accounts</div><div style="display:flex;flex-wrap:wrap;align-items:center;gap:0;margin-bottom:10px">'+accountChips+'<button onclick="gmailConnect()" class="btn-ghost" style="padding:6px 12px;font-size:11.5px;border-radius:20px;margin-bottom:6px">+ connect another</button></div><div style="display:flex;flex-wrap:wrap;align-items:center;gap:0;margin-top:4px"><span class="muted" style="font-size:11px;margin-right:6px">filter:</span>'+filterBtns+'<button onclick="loadEmails()" class="btn-ghost" style="padding:5px 12px;font-size:11.5px;border-radius:20px;margin-left:auto">'+(S.emailListLoading?'loading…':'refresh all')+'</button></div></div>';
 
   // Mailing address per character — small managed block
   var act=activeChars();
@@ -1958,10 +2054,14 @@ function renderInbox(){
   }).join('');
   var addrCard='<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px"><div class="sl" style="margin-bottom:8px">mailing addresses</div><div class="muted" style="font-size:10px;margin-bottom:10px">used in free-sample auto-replies. one per character.</div>'+addrBlocks+'</div>';
 
-  // Email list
-  var emails=S.emails||[];
+  // Email list — filter by active account
+  var allEmails=S.emails||[];
+  var emails=(S.activeAccountFilter==='all'||!S.activeAccountFilter)?allEmails:allEmails.filter(function(e){return e.accountEmail===S.activeAccountFilter;});
+  // Sort newest first by date string (Gmail returns ISO-ish in Date header)
+  emails=emails.slice().sort(function(a,b){var da=new Date(a.date||0).getTime();var db=new Date(b.date||0).getTime();return db-da;});
+
   if(!emails.length){
-    var empty='<div class="card" style="border:0.5px solid;border-radius:12px;padding:24px;text-align:center"><div class="muted" style="font-size:13px">'+(S.emailListLoading?'loading inbox…':'no emails loaded yet — click refresh')+'</div></div>';
+    var empty='<div class="card" style="border:0.5px solid;border-radius:12px;padding:24px;text-align:center"><div class="muted" style="font-size:13px">'+(S.emailListLoading?'loading inbox…':'no emails for this filter — click refresh')+'</div></div>';
     return header+addrCard+empty;
   }
 
@@ -1975,16 +2075,26 @@ function renderInbox(){
     var border=isActive?'1.5px solid #7F77DD':'0.5px solid var(--border)';
     var bg=isActive?'#7F77DD0e':'var(--card-bg)';
     var sentMark=em.sentAt?'<span style="font-size:10px;color:#1D9E75;margin-left:6px">↩ replied</span>':'';
-    return '<div onclick="setActiveEmail(\''+em.id+'\')" style="border:'+border+';background:'+bg+';border-radius:10px;padding:10px 12px;margin-bottom:6px;cursor:pointer"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px"><div style="font-size:12.5px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">'+(em.subject||'(no subject)').replace(/</g,'&lt;')+sentMark+'</div>'+catPill+'</div><div class="muted" style="font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(em.from||'').replace(/</g,'&lt;')+'</div></div>';
+    var acctLabel=(S.activeAccountFilter==='all'||!S.activeAccountFilter)&&em.accountEmail?'<span class="muted" style="font-size:10px;margin-right:6px">'+em.accountEmail.split('@')[0]+'</span>':'';
+    return '<div onclick="setActiveEmail(\''+em.id+'\')" style="border:'+border+';background:'+bg+';border-radius:10px;padding:10px 12px;margin-bottom:6px;cursor:pointer"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px"><div style="font-size:12.5px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">'+(em.subject||'(no subject)').replace(/</g,'&lt;')+sentMark+'</div>'+catPill+'</div><div class="muted" style="font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+acctLabel+(em.from||'').replace(/</g,'&lt;')+'</div></div>';
   }).join('');
-  var listCard='<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 16px;margin-bottom:14px"><div class="sl" style="margin-bottom:10px">recent ('+emails.length+')</div>'+listItems+'</div>';
 
-  // Detail view
+  // Load more buttons — one per account that has a nextPageToken (filtered to active filter scope)
+  var loadMoreBtns='';
+  var moreAccts=S.gmailAccounts.filter(function(a){return a.nextPageToken&&((S.activeAccountFilter==='all'||!S.activeAccountFilter)||S.activeAccountFilter===a.email);});
+  if(moreAccts.length){
+    loadMoreBtns='<div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px">'+moreAccts.map(function(a){return '<button onclick="loadMoreEmails(\''+a.email+'\')" class="btn-ghost" style="padding:7px 14px;font-size:12px;border-radius:8px">'+(S.emailListLoading?'loading…':'load more from '+a.email.split('@')[0])+'</button>';}).join('')+'</div>';
+  }
+
+  var listCard='<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 16px;margin-bottom:14px"><div class="sl" style="margin-bottom:10px">recent ('+emails.length+(allEmails.length!==emails.length?' of '+allEmails.length:'')+')</div>'+listItems+loadMoreBtns+'</div>';
+
+  // Detail view — look up across ALL emails (not just filtered) so a stale filter doesn't hide the active email
   var detail='';
   if(S.activeEmailId){
-    var em=emails.find(function(x){return x.id===S.activeEmailId;});
+    var em=allEmails.find(function(x){return x.id===S.activeEmailId;});
     if(em){
-      var headBlock='<div style="border-bottom:0.5px solid var(--row-div);padding-bottom:10px;margin-bottom:12px"><div style="font-size:14px;font-weight:500;color:var(--text);margin-bottom:4px">'+(em.subject||'(no subject)').replace(/</g,'&lt;')+'</div><div class="muted" style="font-size:11px">'+(em.from||'').replace(/</g,'&lt;')+'</div>'+(em.date?'<div class="muted" style="font-size:10.5px;margin-top:2px">'+em.date.replace(/</g,'&lt;')+'</div>':'')+'</div>';
+      var acctTag=em.accountEmail?'<div class="muted" style="font-size:10.5px;margin-top:2px">account: '+em.accountEmail+'</div>':'';
+      var headBlock='<div style="border-bottom:0.5px solid var(--row-div);padding-bottom:10px;margin-bottom:12px"><div style="font-size:14px;font-weight:500;color:var(--text);margin-bottom:4px">'+(em.subject||'(no subject)').replace(/</g,'&lt;')+'</div><div class="muted" style="font-size:11px">'+(em.from||'').replace(/</g,'&lt;')+'</div>'+(em.date?'<div class="muted" style="font-size:10.5px;margin-top:2px">'+em.date.replace(/</g,'&lt;')+'</div>':'')+acctTag+'</div>';
       var bodyBlock='<div style="background:var(--inp-bg);border:0.5px solid var(--border);border-radius:8px;padding:12px;font-size:12px;line-height:1.55;max-height:240px;overflow:auto;white-space:pre-wrap;color:var(--text);margin-bottom:12px">'+(em.body||em.snippet||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';
 
       var actionBlock;
