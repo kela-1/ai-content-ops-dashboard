@@ -165,7 +165,7 @@ var S={
     {id:'jessica',name:'Jessica',color:'#D85A30',archived:false,description:'',favorites:{products:[],backgrounds:[],motions:[],angles:[]}}
   ],
   videos:[],products:[],backgrounds:[],motions:[],angles:[],modelImages:[],dailyLedger:[],ledgerExpanded:false,
-  gen:{character:null,modelImage:null,background:null,motion:null,angle:null,products:[]},blueprints:[],savingBlueprint:null,
+  gen:{character:null,modelImage:null,background:null,motion:null,angle:null,products:[],customPrompt:''},blueprints:[],savingBlueprint:null,
   earnRange:'thisMonth',earnMetric:'commission',
   bgTags:['City','Night','Bedroom','Gym','Bathroom','Mirror'],
   prodCats:['tops','pants','shoes','jewelry','accessories','other'],
@@ -193,9 +193,10 @@ function load(){
         if(!c.favorites)c.favorites={products:[],backgrounds:[],motions:[],angles:[]};
         ['products','backgrounds','motions','angles'].forEach(function(k){if(!Array.isArray(c.favorites[k]))c.favorites[k]=[];});
       });
-      if(!S.gen||typeof S.gen!=='object')S.gen={character:null,modelImage:null,background:null,motion:null,angle:null,products:[]};
+      if(!S.gen||typeof S.gen!=='object')S.gen={character:null,modelImage:null,background:null,motion:null,angle:null,products:[],customPrompt:''};
       if(!Array.isArray(S.gen.products))S.gen.products=[];
       if(!('modelImage' in S.gen))S.gen.modelImage=null;
+      if(typeof S.gen.customPrompt!=='string')S.gen.customPrompt='';
       if(!Array.isArray(S.modelImages))S.modelImages=[];
       if(!Array.isArray(S.modelImageTags))S.modelImageTags=['portrait','full-body','casual','studio','pose'];
       S.modelImages.forEach(function(mi){if(!Array.isArray(mi.tags))mi.tags=[];});
@@ -1187,7 +1188,18 @@ function setGenBg(id){S.gen.background=S.gen.background===id?null:id;save();rend
 function setGenMotion(id){S.gen.motion=S.gen.motion===id?null:id;save();render();}
 function setGenAngle(id){S.gen.angle=S.gen.angle===id?null:id;save();render();}
 function toggleGenProduct(id){var i=S.gen.products.indexOf(id);if(i>-1)S.gen.products.splice(i,1);else S.gen.products.push(id);save();render();}
-function resetGen(){S.gen={character:null,modelImage:null,background:null,motion:null,angle:null,products:[]};save();render();}
+function resetGen(){S.gen={character:null,modelImage:null,background:null,motion:null,angle:null,products:[],customPrompt:''};save();render();}
+function setGenCustomPrompt(val){
+  S.gen.customPrompt=val;
+  // Live-update the preview without full render so focus + cursor stay put.
+  var pb=document.getElementById('prompt-preview-text');
+  if(pb){
+    var newText=assemblePrompt();
+    var anyNow=newText.length>0;
+    pb.textContent=anyNow?newText:'pick a character to start →';
+  }
+  save();
+}
 
 function assemblePrompt(){
   var g=S.gen;var parts=[];
@@ -1213,7 +1225,10 @@ function assemblePrompt(){
     if(g.angle){var a=S.angles.find(function(x){return x.id===g.angle;});if(a)parts.push(a.promptSnippet||a.name);}
     if(g.motion){var m=S.motions.find(function(x){return x.id===g.motion;});if(m)parts.push(m.promptSnippet||m.name);}
   }
-  return parts.join('. ').replace(/\.+\s*\./g,'.').trim()+(parts.length?'.':'');
+  var assembled=parts.join('. ').replace(/\.+\s*\./g,'.').trim()+(parts.length?'.':'');
+  var custom=(g.customPrompt||'').trim();
+  if(custom)return (assembled?assembled+' ':'')+custom;
+  return assembled;
 }
 
 function copyPrompt(){var p=assemblePrompt();if(!p){showToast('nothing to copy yet — pick something','muted');return;}var ta=document.createElement('textarea');ta.value=p;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');showToast('prompt copied','green');}catch(e){showToast('copy failed','red');}document.body.removeChild(ta);}
@@ -1329,7 +1344,7 @@ function cancelSaveBlueprint(){S.savingBlueprint=null;render();}
 function confirmSaveBlueprint(){
   var i=document.getElementById('bp-name-input');var name=(i?i.value:S.savingBlueprint||'').trim();if(!name){showToast('enter a name','red');return;}
   var g=S.gen;
-  var bp={id:Date.now()+Math.floor(Math.random()*9999),name:name,character:g.character,modelImage:g.modelImage,background:g.background,motion:g.motion,angle:g.angle,products:g.products.slice(),dateAdded:todayStr()};
+  var bp={id:Date.now()+Math.floor(Math.random()*9999),name:name,character:g.character,modelImage:g.modelImage,background:g.background,motion:g.motion,angle:g.angle,products:g.products.slice(),customPrompt:g.customPrompt||'',dateAdded:todayStr()};
   S.blueprints.push(bp);S.savingBlueprint=null;
   var bid=bp.id;pushUndo(function(){S.blueprints=S.blueprints.filter(function(x){return x.id!==bid;});},function(){S.blueprints.push(bp);},'saved blueprint: '+name);
   logH('add','saved blueprint: '+name);save();render();showToast('blueprint saved','green');
@@ -1343,7 +1358,7 @@ function loadBlueprint(id){
   var motOk=bp.motion&&S.motions.some(function(m){return m.id===bp.motion;});
   var angOk=bp.angle&&S.angles.some(function(a){return a.id===bp.angle;});
   var validProds=(bp.products||[]).filter(function(pid){return S.products.some(function(p){return p.id===pid;});});
-  S.gen={character:charOk?bp.character:null,modelImage:miOk?bp.modelImage:null,background:bgOk?bp.background:null,motion:motOk?bp.motion:null,angle:angOk?bp.angle:null,products:validProds};
+  S.gen={character:charOk?bp.character:null,modelImage:miOk?bp.modelImage:null,background:bgOk?bp.background:null,motion:motOk?bp.motion:null,angle:angOk?bp.angle:null,products:validProds,customPrompt:typeof bp.customPrompt==='string'?bp.customPrompt:''};
   var dropped=(bp.character&&!charOk)||(bp.modelImage&&!miOk)||(bp.background&&!bgOk)||(bp.motion&&!motOk)||(bp.angle&&!angOk)||(bp.products||[]).length!==validProds.length;
   save();render();showToast('loaded: '+bp.name+(dropped?' (some items deleted)':''),'green');
 }
@@ -1416,7 +1431,7 @@ function renderGenerator(){
 
   // Prompt preview
   var prompt=assemblePrompt();
-  var hasAny=g.character||g.modelImage||g.background||g.motion||g.angle||g.products.length;
+  var hasAny=g.character||g.modelImage||g.background||g.motion||g.angle||g.products.length||(g.customPrompt&&g.customPrompt.trim());
   var saveForm='';
   if(S.savingBlueprint!=null){
     saveForm='<div style="display:flex;gap:6px;margin-top:10px;align-items:center"><input type="text" id="bp-name-input" class="inp" value="'+String(S.savingBlueprint).replace(/"/g,'&quot;')+'" placeholder="blueprint name" style="flex:1" onkeydown="if(event.key===\'Enter\'){event.preventDefault();confirmSaveBlueprint();}else if(event.key===\'Escape\'){event.preventDefault();cancelSaveBlueprint();}"><button onclick="confirmSaveBlueprint()" class="btn-primary" style="padding:7px 14px;font-size:12px;border-radius:8px">save</button><button onclick="cancelSaveBlueprint()" class="btn-ghost" style="padding:7px 12px;font-size:12px;border-radius:8px">cancel</button></div>';
@@ -1427,7 +1442,7 @@ function renderGenerator(){
     '<button onclick="generateVideo()" '+(genDis?'disabled ':'')+'class="btn-primary" style="padding:7px 16px;font-size:12px;border-radius:8px'+(genDis?';opacity:0.4;cursor:not-allowed':'')+'">'+(genActive?'generating…':'generate video')+'</button>'+
     '<button onclick="copyPrompt()" '+(hasAny?'':'disabled ')+'class="btn-ghost" style="padding:7px 12px;font-size:12px;border-radius:8px'+(hasAny?'':';opacity:0.4;cursor:not-allowed')+'">copy prompt</button>'+
     (hasAny?'<button onclick="startSaveBlueprint()" class="btn-ghost" style="padding:7px 12px;font-size:12px;border-radius:8px">save as blueprint</button><button onclick="resetGen()" class="btn-ghost" style="padding:7px 12px;font-size:12px;border-radius:8px">reset</button>':'');
-  var promptBox='<div class="card" style="border:0.5px solid;border-radius:12px;padding:16px 18px;margin-bottom:12px;'+(hasAny?'border-color:#1D9E7544;background:#1D9E7508':'')+'"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px;flex-wrap:wrap"><div><div class="sl">assembled prompt</div><div class="muted" style="font-size:10px;margin-top:2px">live preview · paste into higgs field</div></div><div style="display:flex;gap:6px;flex-wrap:wrap">'+actionBtns+'</div></div><div style="background:var(--inp-bg);border:0.5px solid var(--border);border-radius:8px;padding:12px;font-family:monospace;font-size:12.5px;line-height:1.6;color:'+(hasAny?'var(--text)':'var(--text3)')+';min-height:48px;white-space:pre-wrap;word-wrap:break-word">'+(hasAny?prompt:'pick a character to start →')+'</div>'+saveForm+'</div>';
+  var promptBox='<div class="card" style="border:0.5px solid;border-radius:12px;padding:16px 18px;margin-bottom:12px;'+(hasAny?'border-color:#1D9E7544;background:#1D9E7508':'')+'"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px;flex-wrap:wrap"><div><div class="sl">assembled prompt</div><div class="muted" style="font-size:10px;margin-top:2px">live preview · paste into higgs field</div></div><div style="display:flex;gap:6px;flex-wrap:wrap">'+actionBtns+'</div></div><div id="prompt-preview-text" style="background:var(--inp-bg);border:0.5px solid var(--border);border-radius:8px;padding:12px;font-family:monospace;font-size:12.5px;line-height:1.6;color:'+(hasAny?'var(--text)':'var(--text3)')+';min-height:48px;white-space:pre-wrap;word-wrap:break-word">'+(hasAny?prompt:'pick a character to start →')+'</div>'+saveForm+'</div>';
 
   // Saved blueprints
   var blueprintsSection='';
@@ -1469,7 +1484,11 @@ function renderGenerator(){
     }
     statusPanel='<div class="card" style="border:0.5px solid '+bd+';border-radius:12px;padding:14px 18px;margin-bottom:12px;background:'+bg+'"><div class="sl" style="margin-bottom:8px;color:'+col+'">'+headLabel+'</div>'+content+'</div>';
   }
-  return blueprintsSection+promptBox+statusPanel+charSection+miSection+bgSection+motSection+angSection+prodSection;
+  // Custom prompt textarea — free-form direction appended to the assembled prompt
+  var customRaw=(g.customPrompt||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  var customPromptSection='<div class="card" style="border:0.5px solid;border-radius:12px;padding:12px 16px;margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><div class="sl">custom prompt · direction</div><div class="muted" style="font-size:10px">appended to the assembled prompt above</div></div><textarea id="gen-custom-prompt" class="inp" rows="2" placeholder="e.g. soft natural lighting, slow zoom in, confident energy" style="resize:vertical;line-height:1.5;font-family:monospace;font-size:12px" oninput="setGenCustomPrompt(this.value)">'+customRaw+'</textarea></div>';
+
+  return blueprintsSection+promptBox+statusPanel+customPromptSection+charSection+miSection+bgSection+motSection+angSection+prodSection;
 }
 
 function renderCharacters(){
