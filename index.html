@@ -176,7 +176,7 @@ var S={
 };
 var HISTORY=[],UNDO_STACK=[],REDO_STACK=[];
 
-function save(){try{var d=JSON.parse(JSON.stringify(S));delete d.view;delete d.editingVideo;delete d.editingProduct;delete d.editingBg;delete d.editingMotion;delete d.editingAngle;delete d.editingModelImage;delete d.ptf;delete d.statusFilter;delete d.pfav;delete d.bgFav;delete d.mtf;delete d.atf;delete d.mfav;delete d.afav;delete d.savingBlueprint;delete d.ttsModal;localStorage.setItem(STORE_KEY,JSON.stringify(d));}catch(e){}}
+function save(){try{var d=JSON.parse(JSON.stringify(S));delete d.view;delete d.editingVideo;delete d.editingProduct;delete d.editingBg;delete d.editingMotion;delete d.editingAngle;delete d.editingModelImage;delete d.ptf;delete d.statusFilter;delete d.pfav;delete d.bgFav;delete d.mtf;delete d.atf;delete d.mfav;delete d.afav;delete d.savingBlueprint;delete d.ttsModal;localStorage.setItem(STORE_KEY,JSON.stringify(d));}catch(e){console.error('localStorage save failed (probably over 5MB cap):',e.message);if(typeof showToast==='function')showToast('save failed: storage full — try removing old images','red');}}
 function saveHistory(){try{localStorage.setItem(HIST_KEY,JSON.stringify(HISTORY.slice(0,1000)));}catch(e){}}
 function load(){
   try{
@@ -1715,8 +1715,14 @@ function setupDZs(){
 
 function saveImg(file,id){
   var reader=new FileReader();
-  reader.onload=function(e){
-    var data=e.target.result;
+  reader.onload=async function(e){
+    var raw=e.target.result;
+    // Compress at upload time so localStorage doesn't silently overflow.
+    // Stored copy: 1024px max, JPEG 0.8 — already plenty for thumbnails AND
+    // matches what we'd send to Higgsfield, so no double work at generate time.
+    var data;
+    try{data=await compressImageForUpload(raw,1024,0.8);}
+    catch(err){console.warn('upload compression failed, using original:',err);data=raw;}
     if(id==='modal-bg'){S.pendingBgImg=data;updPrev('modal-dz-preview',data,'dz-modal-bg');return;}
     if(id==='modal-prod'){S.pendingProdImg=data;updPrev('modal-prod-preview',data,'dz-modal-prod');return;}
     if(id==='modal-motion'){S.pendingMotionImg=data;updPrev('modal-motion-preview',data,'dz-modal-motion');return;}
