@@ -1365,7 +1365,12 @@ async function pollGen(secret){
         return;
       }
       if(TERM_FAIL.indexOf(d.status)>-1){
-        throw new Error('upstream returned status: '+d.status);
+        // Surface every field Higgsfield returned so we can see what actually failed
+        // (image format, content moderation, invalid arg, etc).
+        console.error('Higgsfield status response on failure:',d);
+        var detail=d.error||d.error_message||d.failure_reason||d.detail||d.message||'';
+        var dump=JSON.stringify(d).slice(0,400);
+        throw new Error('upstream returned status: '+d.status+(detail?' — '+detail:'')+' · raw: '+dump);
       }
       render();
     }catch(err){
