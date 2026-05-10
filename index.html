@@ -1248,6 +1248,31 @@ function cancelActiveGen(){
   render();
   setTimeout(clearActiveGen,1500);
 }
+// Resize/recompress a base64 data URL to fit Vercel's 4.5MB request-body cap.
+// Max longest side = maxDim, JPEG quality = quality (0..1). Always re-encodes
+// to JPEG so consistent compression is applied regardless of source format.
+function compressImageForUpload(dataUrl,maxDim,quality){
+  return new Promise(function(resolve,reject){
+    if(!dataUrl){return reject(new Error('empty image data'));}
+    var img=new Image();
+    img.onload=function(){
+      var w=img.width,h=img.height;
+      if(w>maxDim||h>maxDim){
+        if(w>=h){h=Math.round(h*(maxDim/w));w=maxDim;}
+        else    {w=Math.round(w*(maxDim/h));h=maxDim;}
+      }
+      var canvas=document.createElement('canvas');
+      canvas.width=w;canvas.height=h;
+      var ctx=canvas.getContext('2d');
+      ctx.drawImage(img,0,0,w,h);
+      try{resolve(canvas.toDataURL('image/jpeg',quality));}
+      catch(e){reject(e);}
+    };
+    img.onerror=function(){reject(new Error('image failed to load (corrupt or non-image data?)'));};
+    img.src=dataUrl;
+  });
+}
+
 async function generateVideo(){
   var prompt=assemblePrompt();
   if(!prompt){showToast('pick something first','muted');return;}
@@ -1269,6 +1294,21 @@ async function generateVideo(){
       var p=S.products.find(function(x){return x.id===pid;});
       if(p&&p.imageData)images.push(p.imageData);
     });
+  }
+  // Compress images before sending — Vercel Hobby has a 4.5MB request-body cap,
+  // and uncompressed base64 from full-resolution photos blows past that fast.
+  // Resize to max 1024px on the longest side and re-encode as JPEG @ 0.8 quality.
+  if(images.length>0){
+    activeGenState.statusText='compressing '+images.length+' image'+(images.length>1?'s':'')+'…';
+    render();
+    try{
+      images=await Promise.all(images.map(function(d){return compressImageForUpload(d,1024,0.8);}));
+    }catch(err){
+      activeGenState={status:'error',statusText:'image compression failed: '+err.message,error:err.message,startedAt:activeGenState.startedAt};
+      render();
+      showToast('image compression failed','red');
+      return;
+    }
   }
   var body;
   if(images.length>0){
