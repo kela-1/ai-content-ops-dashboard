@@ -251,6 +251,7 @@ function pushUndo(u,r,l){UNDO_STACK.push({undoFn:u,redoFn:r,label:l});if(UNDO_ST
 function doUndo(){if(!UNDO_STACK.length){showToast('nothing to undo','muted');return;}var i=UNDO_STACK.pop();i.undoFn();REDO_STACK.push(i);logH('undo','undid: '+i.label);showToast('undone: '+i.label,'amber');save();render();}
 function doRedo(){if(!REDO_STACK.length){showToast('nothing to redo','muted');return;}var i=REDO_STACK.pop();i.redoFn();UNDO_STACK.push(i);logH('redo','redid: '+i.label);showToast('redid: '+i.label,'purple');save();render();}
 document.addEventListener('keydown',function(e){var m=e.ctrlKey||e.metaKey;if(!m)return;if(e.key==='z'&&!e.shiftKey){e.preventDefault();doUndo();}if(e.key==='z'&&e.shiftKey){e.preventDefault();doRedo();}if(e.key==='y'){e.preventDefault();doRedo();}});
+document.addEventListener('paste',function(e){if(!S.ttsModal||S.ttsModal.step!=='pick'||S.ttsModal.imageDataUrl)return;var it=(e.clipboardData||window.clipboardData).items;if(!it)return;for(var i=0;i<it.length;i++){if(it[i].type.startsWith('image/')){e.preventDefault();setTtsImage(it[i].getAsFile());break;}}});
 
 function showToast(msg,type){
   var wrap=document.getElementById('toast-wrap');if(!wrap)return;
@@ -994,6 +995,7 @@ function renderTtsModal(){
       dz.addEventListener('dragleave',function(){dz.classList.remove('over');});
       dz.addEventListener('drop',function(e){e.preventDefault();dz.classList.remove('over');var f=e.dataTransfer.files[0];if(f)setTtsImage(f);});
       dz.addEventListener('paste',function(e){var it=(e.clipboardData||window.clipboardData).items;for(var i=0;i<it.length;i++){if(it[i].type.startsWith('image/')){e.preventDefault();setTtsImage(it[i].getAsFile());break;}}});
+      dz.focus();
     },0);
   }else if(st.step==='processing'){
     inner.innerHTML=hdr('processing — '+charLabel)+'<div style="text-align:center;padding:30px 0"><div style="font-size:14px;color:var(--text);margin-bottom:8px">'+(st.progress||'working…')+'</div><div class="muted" style="font-size:11px">first run downloads ~10MB of OCR data. cached after that — future runs are fast.</div></div>';
@@ -2353,7 +2355,7 @@ function copyHistory(){try{var txt=HISTORY.map(function(h){return '['+h.time+'] 
 function cpTxt(id){var el=document.getElementById(id);if(!el)return;el.select();try{document.execCommand('copy');}catch(e){}var ok=document.getElementById(id+'-ok');if(ok){ok.style.opacity='1';setTimeout(function(){ok.style.opacity='0';},2000);}}
 
 function selChar(id){S.selChar=id;S.editingBg=null;S.editingVideo=null;S.editingModelImage=null;render();}
-function setPF(cat){S.pf=cat;S.editingProduct=null;render();}
+function setPF(cat){S.pf=cat;setView('products');}
 function setPTF(tag){S.ptf=tag;render();}
 function addBgTagSetting(){var i=document.getElementById('new-bgtag');if(!i)return;var v=i.value.trim();if(v&&!S.bgTags.includes(v)){S.bgTags.push(v);logH('add','added bg tag: '+v);save();render();}i.value='';}
 function addProdTagSetting(){var i=document.getElementById('new-prodtag');if(!i)return;var v=i.value.trim();if(v&&!S.prodTags.includes(v)&&v!=='all'){S.prodTags.push(v);logH('add','added product tag: '+v);save();render();}i.value='';}
