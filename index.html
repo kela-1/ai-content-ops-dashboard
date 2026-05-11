@@ -621,7 +621,9 @@ function renderCreditUsageChart(){
   // Final-point dots
   var dots=series.map(function(s){var li=s.data.length-1;var lv=s.data[li];if(!lv)return '';return '<circle cx="'+xC(li).toFixed(1)+'" cy="'+yC(lv).toFixed(1)+'" r="3" fill="'+s.color+'"/>';}).join('');
   var legend=series.map(function(s){return '<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--text)">'+dot(s.color,7)+s.label+'</span>';}).join('<span style="margin-left:10px"></span>');
-  return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:12px;flex-wrap:wrap"><div><div class="sl">credit usage — last 30 days</div><div class="muted" style="font-size:10px;margin-top:2px">daily total credits per character (from videos)</div></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">'+legend+'</div></div><svg viewBox="0 0 '+W+' '+H+'" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;max-height:240px">'+yLabels+xLabels+paths+dots+'</svg></div>';
+  window.__charts=window.__charts||{};
+  window.__charts['credit']={dates:dates,series:series,W:W,H:H,padL:padL,padR:padR,padT:padT,padB:padB,yMax:yMax,valueFmt:function(v){return v+' cr';}};
+  return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:12px;flex-wrap:wrap"><div><div class="sl">credit usage — last 30 days</div><div class="muted" style="font-size:10px;margin-top:2px">daily total credits per character (from videos)</div></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">'+legend+'</div></div><div id="credit-chart-wrap" style="position:relative"><svg viewBox="0 0 '+W+' '+H+'" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;max-height:240px">'+yLabels+xLabels+paths+dots+chartHover('credit',W,H,padL,padR,padT,padB,series)+'</svg>'+chartTooltip('credit')+'</div></div>';
 }
 
 function renderRevenueChart(){
@@ -643,7 +645,9 @@ function renderRevenueChart(){
   var xLabels='';for(var i=0;i<dates.length;i+=5){xLabels+='<text x="'+xC(i).toFixed(1)+'" y="'+(H-padB+13)+'" fill="var(--text2)" font-size="9.5" text-anchor="middle" font-family="system-ui">'+dates[i].slice(5)+'</text>';}
   var dots=series.map(function(s){var li=s.data.length-1;var lv=s.data[li];if(!lv)return '';return '<circle cx="'+xC(li).toFixed(1)+'" cy="'+yC(lv).toFixed(1)+'" r="3" fill="'+s.color+'"/>';}).join('');
   var legend=series.map(function(s){return '<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--text)">'+dot(s.color,7)+s.label+'</span>';}).join('<span style="margin-left:10px"></span>');
-  return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:12px;flex-wrap:wrap"><div><div class="sl">daily commission — last 30 days</div><div class="muted" style="font-size:10px;margin-top:2px">est. commission per character (from daily ledger)</div></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">'+legend+'</div></div><svg viewBox="0 0 '+W+' '+H+'" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;max-height:220px">'+yLabels+xLabels+paths+dots+'</svg></div>';
+  window.__charts=window.__charts||{};
+  window.__charts['rev']={dates:dates,series:series,W:W,H:H,padL:padL,padR:padR,padT:padT,padB:padB,yMax:yMax,valueFmt:function(v){return fmtUSD(v);}};
+  return '<div class="card" style="border:0.5px solid;border-radius:12px;padding:14px 18px;margin-bottom:14px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:12px;flex-wrap:wrap"><div><div class="sl">daily commission — last 30 days</div><div class="muted" style="font-size:10px;margin-top:2px">est. commission per character (from daily ledger)</div></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">'+legend+'</div></div><div id="rev-chart-wrap" style="position:relative"><svg viewBox="0 0 '+W+' '+H+'" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;max-height:220px">'+yLabels+xLabels+paths+dots+chartHover('rev',W,H,padL,padR,padT,padB,series)+'</svg>'+chartTooltip('rev')+'</div></div>';
 }
 
 function renderEfficiencyBars(){
@@ -1666,16 +1670,14 @@ function renderEarningsChart(chars,dates,metric){
   var yLabels=yTicks.map(function(v){return '<g><line x1="'+padL+'" y1="'+yC(v).toFixed(1)+'" x2="'+(W-padR)+'" y2="'+yC(v).toFixed(1)+'" stroke="var(--row-div)" stroke-width="0.5" stroke-dasharray="2,3"/><text x="'+(padL-6)+'" y="'+(yC(v)+3.5)+'" fill="var(--text2)" font-size="9.5" text-anchor="end" font-family="system-ui">'+prefix+v+'</text></g>';}).join('');
   var xLabels='';var step=Math.max(1,Math.floor(dates.length/6));for(var i=0;i<dates.length;i+=step){xLabels+='<text x="'+xC(i).toFixed(1)+'" y="'+(H-padB+13)+'" fill="var(--text2)" font-size="9.5" text-anchor="middle" font-family="system-ui">'+dates[i].slice(5)+'</text>';}
   var dots=series.map(function(s){var li=s.data.length-1;var lv=s.data[li];if(!lv)return '';return '<circle cx="'+xC(li).toFixed(1)+'" cy="'+yC(lv).toFixed(1)+'" r="3.5" fill="'+s.color+'"/>';}).join('');
-  window.__earnChart={dates:dates,series:series,metric:metric,W:W,H:H,padL:padL,padR:padR,padT:padT,padB:padB,yMax:yMax};
-  var scrub='<line id="earn-scrub" x1="0" y1="'+padT+'" x2="0" y2="'+(H-padB)+'" stroke="var(--text2)" stroke-width="0.6" stroke-dasharray="2,2" opacity="0" pointer-events="none"/>';
-  var hoverDots=series.map(function(s,si){return '<circle id="earn-hd-'+si+'" cx="0" cy="0" r="4" fill="'+s.color+'" stroke="var(--bg)" stroke-width="1.5" opacity="0" pointer-events="none"/>';}).join('');
-  var capture='<rect x="'+padL+'" y="'+padT+'" width="'+(W-padL-padR)+'" height="'+(H-padT-padB)+'" fill="transparent" style="cursor:crosshair" onmousemove="earnChartMove(event)" onmouseleave="earnChartLeave()"/>';
-  return '<div id="earn-chart-wrap" style="position:relative"><svg viewBox="0 0 '+W+' '+H+'" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;max-height:260px">'+yLabels+xLabels+paths+dots+scrub+hoverDots+capture+'</svg><div id="earn-tooltip" style="position:absolute;display:none;pointer-events:none;background:var(--card-bg);border:0.5px solid var(--border);border-radius:6px;padding:7px 10px;font-size:11px;white-space:nowrap;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,0.25);font-family:system-ui;min-width:140px"></div></div>';
+  window.__charts=window.__charts||{};
+  window.__charts['earn']={dates:dates,series:series,W:W,H:H,padL:padL,padR:padR,padT:padT,padB:padB,yMax:yMax,valueFmt:metric==='videos'?function(v){return String(v);}:function(v){return fmtUSD(v);}};
+  return '<div id="earn-chart-wrap" style="position:relative"><svg viewBox="0 0 '+W+' '+H+'" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;max-height:260px">'+yLabels+xLabels+paths+dots+chartHover('earn',W,H,padL,padR,padT,padB,series)+'</svg>'+chartTooltip('earn')+'</div>';
 }
 
-function earnChartMove(e){
-  var d=window.__earnChart;if(!d)return;
-  var wrap=document.getElementById('earn-chart-wrap');if(!wrap)return;
+function chartMove(prefix,e){
+  var d=window.__charts&&window.__charts[prefix];if(!d)return;
+  var wrap=document.getElementById(prefix+'-chart-wrap');if(!wrap)return;
   var svg=wrap.querySelector('svg');if(!svg)return;
   var pt=svg.createSVGPoint();pt.x=e.clientX;pt.y=e.clientY;
   var ctm=svg.getScreenCTM();if(!ctm)return;
@@ -1684,12 +1686,12 @@ function earnChartMove(e){
   var idx=d.dates.length===1?0:Math.round((p.x-d.padL)/chartW*(d.dates.length-1));
   if(idx<0)idx=0;if(idx>d.dates.length-1)idx=d.dates.length-1;
   var xPos=d.dates.length===1?(d.padL+chartW/2):(d.padL+(idx/(d.dates.length-1))*chartW);
-  var scrub=document.getElementById('earn-scrub');
-  if(scrub){scrub.setAttribute('x1',xPos);scrub.setAttribute('x2',xPos);scrub.setAttribute('opacity','0.6');}
-  d.series.forEach(function(s,si){var dot=document.getElementById('earn-hd-'+si);if(!dot)return;var v=s.data[idx];if(v>0){var yPos=d.H-d.padB-(v/d.yMax)*(d.H-d.padT-d.padB);dot.setAttribute('cx',xPos);dot.setAttribute('cy',yPos);dot.setAttribute('opacity','1');}else{dot.setAttribute('opacity','0');}});
-  var tt=document.getElementById('earn-tooltip');
+  var scrubEl=document.getElementById(prefix+'-scrub');
+  if(scrubEl){scrubEl.setAttribute('x1',xPos);scrubEl.setAttribute('x2',xPos);scrubEl.setAttribute('opacity','0.6');}
+  d.series.forEach(function(s,si){var dot=document.getElementById(prefix+'-hd-'+si);if(!dot)return;var v=s.data[idx];if(v>0){var yPos=d.H-d.padB-(v/d.yMax)*(d.H-d.padT-d.padB);dot.setAttribute('cx',xPos);dot.setAttribute('cy',yPos);dot.setAttribute('opacity','1');}else{dot.setAttribute('opacity','0');}});
+  var tt=document.getElementById(prefix+'-tooltip');
   if(tt){
-    var rows=d.series.map(function(s){var v=s.data[idx];var disp=d.metric==='videos'?String(v):fmtUSD(v);return '<div style="display:flex;align-items:center;gap:6px;margin:3px 0"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+s.color+';flex-shrink:0"></span><span style="color:var(--text2);font-size:11px">'+s.label+'</span><span style="color:var(--text);font-weight:500;font-size:11px;margin-left:auto">'+disp+'</span></div>';}).join('');
+    var rows=d.series.map(function(s){var v=s.data[idx];var disp=d.valueFmt?d.valueFmt(v):String(v);return '<div style="display:flex;align-items:center;gap:6px;margin:3px 0"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+s.color+';flex-shrink:0"></span><span style="color:var(--text2);font-size:11px">'+s.label+'</span><span style="color:var(--text);font-weight:500;font-size:11px;margin-left:auto">'+disp+'</span></div>';}).join('');
     tt.innerHTML='<div style="color:var(--text2);font-size:10px;letter-spacing:0.3px;text-transform:uppercase;margin-bottom:4px;font-weight:500">'+d.dates[idx]+'</div>'+rows;
     tt.style.display='block';
     var wrapRect=wrap.getBoundingClientRect();
@@ -1703,10 +1705,21 @@ function earnChartMove(e){
   }
 }
 
-function earnChartLeave(){
-  var s=document.getElementById('earn-scrub');if(s)s.setAttribute('opacity','0');
-  document.querySelectorAll('[id^="earn-hd-"]').forEach(function(dot){dot.setAttribute('opacity','0');});
-  var tt=document.getElementById('earn-tooltip');if(tt)tt.style.display='none';
+function chartLeave(prefix){
+  var s=document.getElementById(prefix+'-scrub');if(s)s.setAttribute('opacity','0');
+  document.querySelectorAll('[id^="'+prefix+'-hd-"]').forEach(function(dot){dot.setAttribute('opacity','0');});
+  var tt=document.getElementById(prefix+'-tooltip');if(tt)tt.style.display='none';
+}
+
+function chartHover(prefix,W,H,padL,padR,padT,padB,series){
+  var scrub='<line id="'+prefix+'-scrub" x1="0" y1="'+padT+'" x2="0" y2="'+(H-padB)+'" stroke="var(--text2)" stroke-width="0.6" stroke-dasharray="2,2" opacity="0" pointer-events="none"/>';
+  var hd=series.map(function(s,si){return '<circle id="'+prefix+'-hd-'+si+'" cx="0" cy="0" r="4" fill="'+s.color+'" stroke="var(--bg)" stroke-width="1.5" opacity="0" pointer-events="none"/>';}).join('');
+  var cap='<rect x="'+padL+'" y="'+padT+'" width="'+(W-padL-padR)+'" height="'+(H-padT-padB)+'" fill="transparent" style="cursor:crosshair" onmousemove="chartMove(\''+prefix+'\',event)" onmouseleave="chartLeave(\''+prefix+'\')"/>';
+  return scrub+hd+cap;
+}
+
+function chartTooltip(prefix){
+  return '<div id="'+prefix+'-tooltip" style="position:absolute;display:none;pointer-events:none;background:var(--card-bg);border:0.5px solid var(--border);border-radius:6px;padding:7px 10px;font-size:11px;white-space:nowrap;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,0.25);font-family:system-ui;min-width:140px"></div>';
 }
 
 function renderEarnings(){
